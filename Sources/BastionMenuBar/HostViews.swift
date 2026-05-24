@@ -73,6 +73,7 @@ struct HostDetailCard: View {
     let onDisconnect: () -> Void
     let onCopyCommand: () -> Void
     let onConnect: () -> Void
+    let onEdit: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -116,6 +117,8 @@ struct HostDetailCard: View {
             }
             HStack(spacing: 8) {
                 Button("Open Terminal", action: onConnect)
+                    .buttonStyle(.bordered)
+                Button("Edit", action: onEdit)
                     .buttonStyle(.bordered)
                 if host.controlMaster.status == .running || host.controlMaster.status == .stale {
                     Button("Disconnect", role: .destructive, action: onDisconnect)
