@@ -5,6 +5,7 @@ import BastionIdentifiers
 @main
 struct BastionMenuBarApp: App {
     @StateObject private var coordinator = AppCoordinator()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
@@ -15,8 +16,48 @@ struct BastionMenuBarApp: App {
                 anyWarning: coordinator.status.iCloudSyncSuspected
                           || !coordinator.status.includeInstalled
             )
+            .background(OnboardingTrigger(coordinator: coordinator))
         }
         .menuBarExtraStyle(.window)
+
+        Window("Bastion Setup", id: "bastion.setup") {
+            OnboardingWindow(coordinator: coordinator) {
+                NSApp.keyWindow?.close()
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
+    }
+}
+
+/// Auto-opens the Setup window once on first launch. Hosted inside the
+/// MenuBarExtra label's `.background` so it's always in the scene graph
+/// (Vigil pattern).
+private struct OnboardingTrigger: View {
+    @ObservedObject var coordinator: AppCoordinator
+    @Environment(\.openWindow) private var openWindow
+    @State private var didTrigger = false
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear {
+                guard !didTrigger else { return }
+                Task {
+                    // Wait briefly so the initial status refresh populates.
+                    try? await Task.sleep(for: .milliseconds(800))
+                    let isEmpty = coordinator.engine.store.isEmpty()
+                    if isEmpty {
+                        await MainActor.run {
+                            didTrigger = true
+                            openWindow(id: "bastion.setup")
+                        }
+                    }
+                }
+            }
     }
 }
 
