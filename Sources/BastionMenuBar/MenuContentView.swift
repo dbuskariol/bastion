@@ -7,6 +7,9 @@ import BastionIdentifiers
 struct MenuContentView: View {
     @ObservedObject var coordinator: AppCoordinator
     @State private var expandedHostIDs: Set<UUID> = []
+    @State private var editorDraft: ManagedHost?
+    @State private var editorOriginalAlias: String?
+    @State private var showingEditor = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,7 +35,8 @@ struct MenuContentView: View {
                                         host: host,
                                         onDisconnect: { coordinator.disconnectMaster(host.alias) },
                                         onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
-                                        onConnect: { coordinator.connect(host.alias) }
+                                        onConnect: { coordinator.connect(host.alias) },
+                                        onEdit: { openEditor(for: host) }
                                     )
                                 }
                             }
@@ -49,6 +53,37 @@ struct MenuContentView: View {
         .frame(width: 380)
         .onAppear { coordinator.popoverDidOpen() }
         .onDisappear { coordinator.popoverDidClose() }
+        .sheet(isPresented: $showingEditor) {
+            if let _ = editorDraft {
+                HostEditorView(
+                    coordinator: coordinator,
+                    draft: Binding(
+                        get: { editorDraft ?? ManagedHost(alias: "new", hostname: "") },
+                        set: { editorDraft = $0 }
+                    ),
+                    originalAlias: editorOriginalAlias,
+                    onSaved: { showingEditor = false },
+                    onCancel: { showingEditor = false }
+                )
+            }
+        }
+    }
+
+    private func openEditor(for host: HostSnapshot? = nil) {
+        if let host {
+            let registry = (try? coordinator.engine.loadRegistry()) ?? HostRegistry()
+            if let existing = registry.host(named: host.alias) {
+                editorDraft = existing
+                editorOriginalAlias = existing.alias
+            } else {
+                editorDraft = nil
+                editorOriginalAlias = nil
+            }
+        } else {
+            editorDraft = ManagedHost(alias: "new-host", hostname: "")
+            editorOriginalAlias = nil
+        }
+        showingEditor = true
     }
 
     private func binding(for hostID: UUID) -> Binding<Bool> {
@@ -66,6 +101,7 @@ struct MenuContentView: View {
         Button("Connect")             { coordinator.connect(host.alias) }
         Button("Connect (new window)") { coordinator.connect(host.alias, newWindow: true) }
         Divider()
+        Button("Edit…")               { openEditor(for: host) }
         Button("Copy ssh command")    { coordinator.copyConnectCommand(host.alias) }
         Button("Open in ~/.ssh/config") { coordinator.openManagedConfig() }
         if host.controlMaster.status == .running || host.controlMaster.status == .stale {
@@ -109,6 +145,11 @@ struct MenuContentView: View {
                     .foregroundStyle(.orange)
                     .help("Include block missing from ~/.ssh/config. Run `bastion config install-include`.")
             }
+            Button(action: { openEditor() }) {
+                Image(systemName: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Add host")
         }
         .padding(10)
     }
@@ -124,11 +165,12 @@ struct MenuContentView: View {
                 .padding(.top, 12)
             Text("No hosts yet")
                 .font(.system(size: 13, weight: .medium))
-            Text("Run `bastion import all --apply` to bring in connections\nfrom your shell history.")
+            Text("Run `bastion import all --apply` to bring in connections\nfrom your shell history, or add one manually.")
                 .font(.caption)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 24)
+            Button("Add host") { openEditor() }
                 .padding(.bottom, 14)
         }
         .frame(maxWidth: .infinity)
