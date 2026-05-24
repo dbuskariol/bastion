@@ -98,6 +98,12 @@ public final class ConnectionEngine: @unchecked Sendable {
     /// validate. Throws on validation failure; the registry is rolled
     /// back to its pre-upsert state on integration failure.
     public func upsertHost(_ host: ManagedHost, skipIntegrationPass: Bool = false) async throws -> ManagedConfigWriteResult {
+        // Model-layer validation — runs before any disk write, so both
+        // editor and CLI mutations hit the same FIDO/ControlMaster
+        // interlock + socket-path-length sanity check. The editor's
+        // async `ssh -G` probe handles the `.inherit` case at the UI
+        // level; this is the load-bearing CLI-parity guardrail.
+        try host.validateForSave()
         var registry = try store.load()
         let previous = registry
         registry.upsert(host)
@@ -169,9 +175,15 @@ public final class ConnectionEngine: @unchecked Sendable {
 
         if result.exitCode == 0 || SSHCheckParser.indicatesMasterRunning(result.stderr) {
             let pid = SSHCheckParser.parseMasterPid(result.stderr)
-            let established = masterUptimeStore.recordSeen(alias: alias, at: now)
+            // Prefer the socket file's birthtime (st_birthtimespec) as
+            // the master's established-at — it's kernel truth, survives
+            // Bastion restart, and works for masters not spawned by
+            // Bastion (e.g. user opened a manual `ssh -fNM` from CLI).
+            // Falls back to first-observed-at if stat fails.
+            let birthtime = SocketBirthtime.lookup(path: socketURL.path)
+            let observedAt = birthtime ?? now
+            let established = masterUptimeStore.recordSeen(alias: alias, at: observedAt)
             let channels = await channelProbe.count(socketPath: socketURL.path, masterPid: pid)
-            let uptime: Int? = established.map { Int(now.timeIntervalSince($0)) }
             return ControlMasterState(
                 enabled: true,
                 status: .running,
@@ -226,24 +238,102 @@ public final class ConnectionEngine: @unchecked Sendable {
         )
     }
 
+    /// Same as `establishBackgroundMaster` but with a hard timeout that
+    /// actually kills the spawned ssh subprocess. Used by the FIDO
+    /// fast-path: try a cached-cred bootstrap first; on timeout, fall
+    /// through to the foreground terminal launch.
+    ///
+    /// **Why subprocess-killing matters**: per rubber-duck pass, Swift
+    /// Task.cancel() is cooperative. A naive timeout that just stops
+    /// awaiting would leave the BatchMode probe running. If it succeeds
+    /// 100ms after we already launched the foreground `ssh -fNM`, two
+    /// masters race for the same socket; the user wastes a FIDO touch.
+    /// `ProcessTimeout.run` owns the Process and SIGTERMs / SIGKILLs it
+    /// before returning.
+    ///
+    /// Returns nil on timeout (treat as "no fast-path"); returns the
+    /// run result on completion (caller checks `exitCode == 0`).
+    public func establishBackgroundMasterWithTimeout(
+        _ alias: String,
+        timeout: TimeInterval = 2.0
+    ) async -> ProcessRunResult? {
+        let env = pathResolver.environment()
+        // -o ConnectTimeout caps the TCP-connect phase server-side; the
+        // Task-level timeout caps the post-connect (auth) phase. Belt+suspenders.
+        let result = await ProcessTimeout.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ssh"),
+            arguments: ["-fNM",
+                        "-o", "BatchMode=yes",
+                        "-o", "ConnectTimeout=2",
+                        alias],
+            environment: env,
+            timeout: timeout
+        )
+        return result.timedOut ? nil : result
+    }
+
+    /// Outcome of `awaitMaster` polling. Richer than the previous Bool
+    /// so the connect flow can produce diagnostic chips per outcome
+    /// (consensus + rubber-duck: "failure must be diagnostic").
+    public enum AwaitMasterOutcome: Equatable, Sendable {
+        case alive
+        case timeout
+        case staleAfterHeal(socket: String)   // stale socket healed once but came back stale
+        case preflightFailed(String)          // ssh -G says no master configured for this alias
+
+        public var description: String {
+            switch self {
+            case .alive:                       return "alive"
+            case .timeout:                     return "timeout"
+            case .staleAfterHeal(let s):       return "stale-after-heal(\(s))"
+            case .preflightFailed(let r):      return "preflight-failed(\(r))"
+            }
+        }
+    }
+
     /// Poll `ssh -O check` until the master comes up or the deadline
     /// passes. Used by the connect-with-bootstrap flow to detect when
     /// the user has completed the FIDO/SSO dance in their terminal.
-    /// Returns true if alive, false on timeout. Cadence is cheap (local
-    /// AF_UNIX socket connect).
+    /// Returns a rich outcome instead of a Bool so the chip can diagnose.
+    ///
+    /// Self-heals a stale socket once per call (some sockets are left
+    /// behind by killed previous masters; without removing them the new
+    /// master can't bind). Limited to once per call to prevent an
+    /// infinite delete-respawn loop if a buggy server keeps marking
+    /// the socket dead.
     public func awaitMaster(
         _ alias: String,
         timeout: TimeInterval = 180,
         pollInterval: TimeInterval = 1
-    ) async -> Bool {
+    ) async -> AwaitMasterOutcome {
         let deadline = Date().addingTimeInterval(timeout)
+        var healedOnce = false
         while Date() < deadline {
-            if let state = try? await checkMaster(alias), state.status == .running {
-                return true
+            let state = (try? await checkMaster(alias))
+                        ?? ControlMasterState(status: .unknown)
+            switch state.status {
+            case .running:
+                return .alive
+            case .disabled:
+                // Effective config has ControlMaster disabled — polling
+                // will never succeed. Bail with a diagnostic.
+                return .preflightFailed("ControlMaster disabled in effective config")
+            case .stale where !healedOnce:
+                healedOnce = true
+                if let path = state.controlPath {
+                    try? FileManager.default.removeItem(
+                        atPath: NSString(string: path).expandingTildeInPath
+                    )
+                }
+                // Fall through to sleep + re-poll.
+            case .stale:
+                return .staleAfterHeal(socket: state.controlPath ?? "?")
+            default:
+                break
             }
             try? await Task.sleep(for: .seconds(pollInterval))
         }
-        return false
+        return .timeout
     }
 
     /// `ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> true`. Used by
@@ -342,7 +432,12 @@ public final class MasterUptimeStore: @unchecked Sendable {
     @discardableResult
     public func recordSeen(alias: String, at date: Date) -> Date? {
         lock.lock(); defer { lock.unlock() }
-        if let existing = cache[alias] { return existing }
+        // If we have an older established-at on file, keep it — unless
+        // the supplied date is earlier (e.g. socket birthtime is older
+        // than our cached first-observed). This handles app restart:
+        // socket was created an hour ago, our cache says we just saw
+        // it; the *real* established-at is the older birthtime.
+        if let existing = cache[alias], existing <= date { return existing }
         cache[alias] = date
         persistToDisk()
         return date

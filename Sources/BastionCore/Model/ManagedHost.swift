@@ -97,7 +97,7 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         user: String? = nil,
         port: Int = 22,
         identityFiles: [String] = [],
-        controlMaster: ControlMasterChoice = .inherit,
+        controlMaster: ControlMasterChoice = .on,
         controlPersist: ControlPersistChoice = .inherit,
         advanced: [SSHOption: String] = [:],
         rawConfigOverride: String? = nil,
@@ -149,6 +149,46 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         self.createdAt = try c.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
         self.requiresInteractiveAuth = try c.decodeIfPresent(Bool.self, forKey: .requiresInteractiveAuth) ?? false
+    }
+
+    /// Model-layer save invariants. Called from `ConnectionEngine.upsertHost`
+    /// so both the editor and the CLI hit the same enforcement.
+    ///
+    /// Two rules so far, both load-bearing for the FIDO/SSO bootstrap flow:
+    ///
+    /// 1. FIDO hosts MUST have `controlMaster == .on`. A FIDO host with
+    ///    `.off` is silently broken (we write `ControlMaster no` so the
+    ///    `ssh -fNM` we launch can't bind a socket, and `ssh -O check`
+    ///    will never find a master). A FIDO host with `.inherit` is only
+    ///    valid if the user's global `~/.ssh/config` has `Host *` or a
+    ///    matching block that sets ControlMaster — but we have no way to
+    ///    verify that here in the model layer. The editor's save-time
+    ///    `ssh -G` probe handles the `.inherit` case with a richer
+    ///    error. From the CLI we apply the stricter rule (`.on` only).
+    /// 2. The resolved ControlPath length must fit Darwin's Unix-socket
+    ///    cap (104 chars). Our managed path expands `%C` to a 40-char
+    ///    SHA1 hash; we conservatively cap the prefix.
+    public func validateForSave() throws {
+        if requiresInteractiveAuth && controlMaster == .off {
+            throw SSHConfigError.invalidValue(
+                option: "controlMaster",
+                reason: "FIDO/SSO hosts require ControlMaster=On — otherwise every command would prompt for a FIDO touch. Change ControlMaster to On in the editor."
+            )
+        }
+        // ~/.ssh/sockets/<40-hex-hash> = roughly 60 chars on a typical
+        // /Users/<short>/ install. Long-username corporate accounts
+        // (/Users/firstname.middlename.lastname/) clip 90+. The Darwin
+        // cap is 104. Reject paths likely to exceed it at save time
+        // rather than at bind time with an opaque error.
+        let homeLen = FileManager.default.homeDirectoryForCurrentUser.path.count
+        let socketPrefix = homeLen + "/.ssh/sockets/".count
+        let estimatedPathLen = socketPrefix + 40
+        if controlMaster == .on && estimatedPathLen > 100 {
+            throw SSHConfigError.invalidValue(
+                option: "controlPath",
+                reason: "Your home directory path is too long for Bastion's default ControlPath (would exceed the 104-character Unix socket limit). Workaround: set a shorter ControlPath in the Raw tab, e.g. `ControlPath /tmp/sshmux/%C`, after manually creating /tmp/sshmux."
+            )
+        }
     }
 }
 
