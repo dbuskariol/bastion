@@ -22,31 +22,13 @@ struct HostEditorWindow: View {
             originalAlias: state.originalAlias,
             onSaved: {
                 state.isReady = false
-                closeHostEditorWindow()
+                ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             },
             onCancel: {
                 state.isReady = false
-                closeHostEditorWindow()
+                ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             }
         )
-        .onAppear {
-            NSApp.activate(ignoringOtherApps: true)
-        }
-    }
-
-    /// Close the host-editor window without using @Environment(\.dismissWindow)
-    /// (which is macOS 14+). NSWindow.close on the matching window
-    /// works on macOS 13.
-    private func closeHostEditorWindow() {
-        for window in NSApp.windows {
-            // SwiftUI Window scenes get NSWindow identifiers shaped like
-            // "bastion.host-editor-AppWindow-1". Match on prefix.
-            if window.identifier?.rawValue.contains("bastion.host-editor") == true {
-                window.close()
-                return
-            }
-        }
-        // Fallback: close the key window.
-        NSApp.keyWindow?.close()
+        .managesActivationPolicy(identifierPrefix: "bastion.host-editor")
     }
 }

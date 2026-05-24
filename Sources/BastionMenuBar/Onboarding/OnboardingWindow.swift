@@ -79,6 +79,7 @@ struct OnboardingWindow: View {
             footer
         }
         .frame(width: 560, height: 540)
+        .managesActivationPolicy(identifierPrefix: "bastion.setup")
         .onAppear {
             model.selectedTerminal = coordinator.defaultTerminal ?? coordinator.detector.suggestedDefault()
             Task {
