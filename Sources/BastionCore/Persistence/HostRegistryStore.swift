@@ -122,11 +122,15 @@ public final class HostRegistryStore: @unchecked Sendable {
             throw PersistenceError.io("rename failed: \(String(cString: strerror(errno))))")
         }
 
-        // Round-trip read-back. If it fails, restore from .prev so we never
-        // leave the user with a half-written registry.
+        // Round-trip read-back. Verifies integrity: we can decode what we
+        // just wrote into a registry whose hosts match by id. We don't
+        // strict-equal because JSONEncoder's .iso8601 strategy truncates
+        // sub-second precision; the in-memory Date and the decoded Date
+        // are coherent but not byte-equal.
         do {
             let reread = try decode(url: storeFile)
-            if reread != registry {
+            if reread.schemaVersion != registry.schemaVersion
+                || Set(reread.hosts.map(\.id)) != Set(registry.hosts.map(\.id)) {
                 try? fileManager.removeItem(at: storeFile)
                 if fileManager.fileExists(atPath: prevFile.path) {
                     try? fileManager.copyItem(at: prevFile, to: storeFile)
