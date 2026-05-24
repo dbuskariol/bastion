@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Bastion shells out to /usr/bin/osascript to launch ssh sessions in
+        Terminal.app and iTerm2 (and other AppleScript-only terminals). Under
+        Hardened Runtime, sending Apple events to other applications requires
+        this entitlement; without it the first AppleScript send triggers a
+        TCC prompt that the user can deny with no easy programmatic
+        re-prompt.
+
+        Paired with `NSAppleEventsUsageDescription` in Info.plist so the
+        consent prompt explains why.
+    -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>
