@@ -23,6 +23,12 @@ final class AppCoordinator: ObservableObject {
 
     private var refreshTask: Task<Void, Never>?
     private var popoverIsOpen: Bool = false
+    private var pathWatcher: PathChangeWatcher?
+    /// Track which hosts' masters are alive so we can detect transitions
+    /// (alive → dead) and emit notifications.
+    private var lastAliveHosts: Set<String> = []
+    /// Per-host last-notification timestamps so we don't spam on flaps.
+    private var notifiedAt: [String: Date] = [:]
 
     init() {
         self.detector = TerminalDetector(
@@ -32,10 +38,19 @@ final class AppCoordinator: ObservableObject {
             ?? detector.suggestedDefault()
         Task { await self.refreshNow() }
         startPolling()
+        startPathWatcher()
     }
 
     deinit {
         refreshTask?.cancel()
+    }
+
+    private func startPathWatcher() {
+        let watcher = PathChangeWatcher { [weak self] in
+            await self?.refreshNow()
+        }
+        watcher.start()
+        self.pathWatcher = watcher
     }
 
     // MARK: - Lifecycle
@@ -73,9 +88,34 @@ final class AppCoordinator: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
         let report = await engine.snapshot(appVersion: BastionVersion.value)
+        await detectAndNotifyTransitions(newReport: report)
         self.status = report
         self.lastMessage = "Updated \(Self.timeFormatter.string(from: report.generatedAt))"
         return report
+    }
+
+    /// Compare the new report against `lastAliveHosts` and dispatch
+    /// notifications for masters that flipped from alive → dead while
+    /// inside ControlPersist. Coalesces with `notifiedAt` so a flapping
+    /// network doesn't spam Notification Centre.
+    private func detectAndNotifyTransitions(newReport: StatusReport) async {
+        guard preferences.notifyOnMasterDrop else {
+            lastAliveHosts = Set(newReport.hosts.filter { $0.controlMaster.status == .running }.map { $0.alias })
+            return
+        }
+        let alive = Set(newReport.hosts.filter { $0.controlMaster.status == .running }.map { $0.alias })
+        let dropped = lastAliveHosts.subtracting(alive)
+        let now = Date()
+        for alias in dropped {
+            if let last = notifiedAt[alias], now.timeIntervalSince(last) < 60 { continue }
+            notifiedAt[alias] = now
+            await NotificationDispatcher.shared.post(
+                category: .masterDropped,
+                host: alias,
+                body: "The ControlMaster for \(alias) dropped unexpectedly."
+            )
+        }
+        lastAliveHosts = alive
     }
 
     private static let timeFormatter: DateFormatter = {
