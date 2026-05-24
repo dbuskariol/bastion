@@ -5,11 +5,12 @@ import BastionIdentifiers
 @main
 struct BastionMenuBarApp: App {
     @StateObject private var coordinator = AppCoordinator()
+    @StateObject private var updateController = UpdateController()
     @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContentView(coordinator: coordinator)
+            MenuContentView(coordinator: coordinator, updateController: updateController)
         } label: {
             MenuBarLabel(
                 anyMasterAlive: coordinator.status.hosts.contains { $0.controlMaster.status == .running },

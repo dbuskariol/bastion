@@ -1,0 +1,35 @@
+name: Swift
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/.cache/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+      - name: Build (release)
+        run: swift build -c release
+      - name: Build tests
+        run: swift build --build-tests
+      - name: Run tests
+        run: swift test --enable-swift-testing
+      - name: make app (ad-hoc signed)
+        run: make app
+      - name: Smoke test CLI
+        run: |
+          ./.build/release/bastion --version
+          ./.build/release/bastion --help | head -5
