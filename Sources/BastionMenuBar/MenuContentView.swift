@@ -36,7 +36,7 @@ struct MenuContentView: View {
                                 HostRow(
                                     host: host,
                                     expanded: binding(for: host.id),
-                                    authState: coordinator.interactiveAuthStates[host.alias] ?? .notRequired,
+                                    authState: coordinator.authState(for: host),
                                     onConnect: { coordinator.connect(host.alias) }
                                 )
                                 .contextMenu {
@@ -49,7 +49,10 @@ struct MenuContentView: View {
                                         onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
                                         onConnect: { coordinator.connect(host.alias) },
                                         onEdit: { openEditor(for: host.alias) },
-                                        onDelete: { coordinator.deleteHost(host.alias) }
+                                        onDelete: { coordinator.deleteHost(host.alias) },
+                                        onUnlock: { coordinator.unlockMaster(host.alias) },
+                                        orphanCount: coordinator.orphansByAlias[host.alias]?.count ?? 0,
+                                        onReapOrphans: { coordinator.reapOrphans(for: host.alias) }
                                     )
                                 }
                             }
@@ -72,6 +75,26 @@ struct MenuContentView: View {
             coordinator.popoverDidOpen()
         }
         .onDisappear { coordinator.popoverDidClose() }
+        .sheet(isPresented: $coordinator.fidoMigrationDialogPresented) {
+            FidoMigrationSheet(
+                candidates: coordinator.fidoMigrationCandidates,
+                onFixAll: {
+                    coordinator.fidoMigrationFixAll()
+                },
+                onReviewEach: {
+                    // Mark acked (the per-host editor warning will
+                    // still fire as the user opens each one) and let
+                    // them work through manually.
+                    coordinator.ackFidoMigration()
+                    if let first = coordinator.fidoMigrationCandidates.first {
+                        openEditor(for: first.alias)
+                    }
+                },
+                onNotNow: {
+                    coordinator.ackFidoMigration()
+                }
+            )
+        }
     }
 
     @ViewBuilder

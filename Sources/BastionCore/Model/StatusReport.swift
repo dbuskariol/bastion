@@ -87,6 +87,11 @@ public struct HostSnapshot: Codable, Sendable, Equatable, Identifiable {
     /// Stable lifetime of the master — establishedAt-derived, formatted
     /// for the live diagnostics card.
     public var uptimeSeconds: Int?
+    /// Mirrors `ManagedHost.requiresInteractiveAuth`. Lets the UI
+    /// render the `.ready` chip derived from snapshot state (not the
+    /// in-memory `interactiveAuthStates` dict), so the chip survives
+    /// app restart for hosts whose master is still alive.
+    public var requiresInteractiveAuth: Bool
 
     public init(
         id: UUID,
@@ -99,7 +104,8 @@ public struct HostSnapshot: Codable, Sendable, Equatable, Identifiable {
         source: HostSource = .managed,
         controlMaster: ControlMasterState = ControlMasterState(),
         lastError: ConnectionLastError? = nil,
-        uptimeSeconds: Int? = nil
+        uptimeSeconds: Int? = nil,
+        requiresInteractiveAuth: Bool = false
     ) {
         self.id = id
         self.alias = alias
@@ -112,6 +118,31 @@ public struct HostSnapshot: Codable, Sendable, Equatable, Identifiable {
         self.controlMaster = controlMaster
         self.lastError = lastError
         self.uptimeSeconds = uptimeSeconds
+        self.requiresInteractiveAuth = requiresInteractiveAuth
+    }
+
+    // Custom decoder so adding `requiresInteractiveAuth` doesn't break
+    // cached status-cache.json files written before the field existed.
+    private enum CodingKeys: String, CodingKey {
+        case id, alias, hostname, resolvedHostname, user, port
+        case identityFiles, source, controlMaster, lastError
+        case uptimeSeconds, requiresInteractiveAuth
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.alias = try c.decode(String.self, forKey: .alias)
+        self.hostname = try c.decode(String.self, forKey: .hostname)
+        self.resolvedHostname = try c.decodeIfPresent(String.self, forKey: .resolvedHostname)
+        self.user = try c.decodeIfPresent(String.self, forKey: .user)
+        self.port = try c.decode(Int.self, forKey: .port)
+        self.identityFiles = try c.decode([String].self, forKey: .identityFiles)
+        self.source = try c.decode(HostSource.self, forKey: .source)
+        self.controlMaster = try c.decode(ControlMasterState.self, forKey: .controlMaster)
+        self.lastError = try c.decodeIfPresent(ConnectionLastError.self, forKey: .lastError)
+        self.uptimeSeconds = try c.decodeIfPresent(Int.self, forKey: .uptimeSeconds)
+        self.requiresInteractiveAuth = try c.decodeIfPresent(Bool.self, forKey: .requiresInteractiveAuth) ?? false
     }
 }
 

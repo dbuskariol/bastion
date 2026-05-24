@@ -397,7 +397,8 @@ public final class ConnectionEngine: @unchecked Sendable {
             identityFiles: host.identityFiles,
             source: .managed,
             controlMaster: cm,
-            uptimeSeconds: cm.establishedAt.map { Int(Date().timeIntervalSince($0)) }
+            uptimeSeconds: cm.establishedAt.map { Int(Date().timeIntervalSince($0)) },
+            requiresInteractiveAuth: host.requiresInteractiveAuth
         )
     }
 

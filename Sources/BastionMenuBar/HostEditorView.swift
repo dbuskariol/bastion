@@ -151,6 +151,7 @@ struct BasicTab: View {
     @Binding var draft: ManagedHost
     @ObservedObject var coordinator: AppCoordinator
     @State private var newIdentityPath: String = ""
+    @State private var fidoAutoUpgradeNotice: String? = nil
 
     var body: some View {
         ScrollView {
@@ -180,6 +181,22 @@ struct BasicTab: View {
                 identityFilesSection
                 controlMasterSection
                 tagsSection
+            }
+        }
+        .onAppear {
+            // Existing-host auto-upgrade: a registry from before the
+            // interlock could legitimately have (FIDO=true,
+            // ControlMaster=.off). Without this nudge, the user opens
+            // the editor and the picker disables Off, but Off is also
+            // their current selection — they can't escape. Mirror the
+            // toggle-on auto-upgrade with a visible disclosure.
+            if draft.requiresInteractiveAuth && draft.controlMaster != .on {
+                let previous = draft.controlMaster
+                draft.controlMaster = .on
+                if case .inherit = draft.controlPersist {
+                    draft.controlPersist = .defaultChoice
+                }
+                fidoAutoUpgradeNotice = "Auto-set ControlMaster=On (was \(previous.displayName)) — FIDO hosts need a persistent master."
             }
         }
     }
@@ -257,10 +274,18 @@ struct BasicTab: View {
             Picker("", selection: $draft.controlMaster) {
                 Text("Inherit").tag(ControlMasterChoice.inherit)
                 Text("On").tag(ControlMasterChoice.on)
-                Text("Off").tag(ControlMasterChoice.off)
+                Text("Off")
+                    .tag(ControlMasterChoice.off)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .disabled(false)
+            // FIDO interlock — disable Off entirely while FIDO is on.
+            // SwiftUI segmented pickers don't disable individual tags;
+            // we surface a clear warning + the save validator refuses
+            // the combo, but we also visually demote the picker so it
+            // looks decisive.
+            .opacity(draft.requiresInteractiveAuth ? 0.95 : 1.0)
             if draft.controlMaster != .off {
                 HStack {
                     Text("Persist").font(.caption).foregroundStyle(.secondary)
@@ -277,11 +302,40 @@ struct BasicTab: View {
             }
             Toggle("Requires interactive (FIDO/SSO) auth", isOn: $draft.requiresInteractiveAuth)
                 .font(.caption)
+                .onChange(of: draft.requiresInteractiveAuth) { newValue in
+                    // When FIDO is toggled on with anything other than
+                    // .on, transparently upgrade and surface a one-line
+                    // disclosure. Mirrors `gh auth login`'s "we did X
+                    // for you" pattern — visible, not silent magic.
+                    if newValue && draft.controlMaster != .on {
+                        let previous = draft.controlMaster
+                        draft.controlMaster = .on
+                        if case .inherit = draft.controlPersist {
+                            draft.controlPersist = .defaultChoice
+                        }
+                        fidoAutoUpgradeNotice = "Auto-set ControlMaster=On (was \(previous.displayName)) — FIDO hosts need a persistent master."
+                    } else if !newValue {
+                        fidoAutoUpgradeNotice = nil
+                    }
+                }
+            if let notice = fidoAutoUpgradeNotice {
+                Label(notice, systemImage: "wand.and.stars")
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if draft.requiresInteractiveAuth {
-                Text("Connect will open `ssh -fNM` in your terminal so you can complete the browser/FIDO touch once. Bastion then opens a shell tab automatically when the master is ready, and every connect for the next ControlPersist window is instant.")
+                Text("Connect tries cached creds first (instant if your ssh-agent / 1Password / passkey already authenticates). Otherwise opens `ssh -fNM` in your terminal for one FIDO touch, then opens a shell automatically. Every subsequent connect from any tool — Bastion, git, vscode — is instant for the next ControlPersist window.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if draft.controlMaster != .on {
+                    Label("FIDO hosts require ControlMaster=On. Save will be blocked otherwise.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

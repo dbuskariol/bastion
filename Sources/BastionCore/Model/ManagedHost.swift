@@ -25,6 +25,14 @@ public enum ControlMasterChoice: String, Codable, Sendable, CaseIterable {
         case .off:     return "no"
         }
     }
+
+    public var displayName: String {
+        switch self {
+        case .inherit: return "Inherit"
+        case .on:      return "On"
+        case .off:     return "Off"
+        }
+    }
 }
 
 /// How long the master socket lingers after the last channel closes.

@@ -49,6 +49,15 @@ public enum Paths {
         appSupportDirectory.appendingPathComponent("onboarding-resume-step")
     }
 
+    /// Per dual-model consensus: one-time migration ack for the FIDO
+    /// ControlMaster interlock. Written when the user dismisses or
+    /// completes the migration dialog; subsequent app launches skip
+    /// the dialog (per-host editor warning still fires).
+    public static var fidoMigrationAckedMarker: URL {
+        let migrationsDir = appSupportDirectory.appendingPathComponent("migrations", isDirectory: true)
+        return migrationsDir.appendingPathComponent("2025-fido-master.acked")
+    }
+
     // MARK: - User SSH
     public static var userSSHDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser

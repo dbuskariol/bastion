@@ -143,7 +143,103 @@ final class AppCoordinator: ObservableObject {
         if newBadge != self.menuBarBadge {
             self.menuBarBadge = newBadge
         }
+
+        // Refresh orphan detection. Only scan for hosts whose master is
+        // NOT running — a running master means the `ssh -fNM` we'd
+        // otherwise flag is the legitimate alive master. Scan happens
+        // off the main actor (synchronous ps fork is ~5-20ms).
+        let aliasesNeedingScan = report.hosts
+            .filter { $0.controlMaster.status != .running }
+            .map { $0.alias }
+        if !aliasesNeedingScan.isEmpty {
+            let scanned = await Task.detached { () -> [String: [OrphanReaper.Orphan]] in
+                var byAlias: [String: [OrphanReaper.Orphan]] = [:]
+                for alias in aliasesNeedingScan {
+                    let found = OrphanReaper.scan(forAlias: alias)
+                    if !found.isEmpty { byAlias[alias] = found }
+                }
+                return byAlias
+            }.value
+            self.orphansByAlias = scanned
+        } else {
+            self.orphansByAlias = [:]
+        }
+
+        // FIDO migration scan: hosts where requiresInteractiveAuth is
+        // true but ControlMaster is disabled in the effective config.
+        // These will fail to connect. Surface in the one-time dialog
+        // unless the user has already acked.
+        if !fidoMigrationAcked {
+            var candidates: [HostSnapshot] = []
+            for host in report.hosts where host.requiresInteractiveAuth {
+                // `controlMaster.status == .disabled` is exactly the
+                // condition: effective `ssh -G controlmaster` is "no"
+                // or `usableControlPath` is nil. Same predicate the
+                // engine uses to short-circuit `checkMaster`.
+                if host.controlMaster.status == .disabled {
+                    candidates.append(host)
+                }
+            }
+            self.fidoMigrationCandidates = candidates
+            // Only present if there's actually something to fix.
+            // Avoid re-presenting if the popover was dismissed mid-
+            // dialog — the user will see it again on next popover
+            // open. (file-truth predicate, no @State cache.)
+            if !candidates.isEmpty && !fidoMigrationDialogPresented {
+                fidoMigrationDialogPresented = true
+            } else if candidates.isEmpty {
+                fidoMigrationDialogPresented = false
+            }
+        }
+
         return report
+    }
+
+    /// Apply the consensus fix to all flagged FIDO hosts in one go:
+    /// set ControlMaster=on, default ControlPersist if it was inherit.
+    /// Route through `upsertHost` so the validator and writer run.
+    func fidoMigrationFixAll() {
+        Task {
+            for candidate in fidoMigrationCandidates {
+                guard var host = (try? engine.loadRegistry())?.host(named: candidate.alias) else { continue }
+                host.controlMaster = .on
+                if case .inherit = host.controlPersist {
+                    host.controlPersist = .defaultChoice
+                }
+                _ = await upsertHost(host, skipIntegrationPass: true)
+            }
+            ackFidoMigration()
+            await refreshNow()
+        }
+    }
+
+    /// Write the ack marker so we don't re-present the dialog. Per-host
+    /// editor warning still fires whenever the user opens that host.
+    func ackFidoMigration() {
+        try? Paths.ensureAppSupportDirectoryExists()
+        // Ensure migrations subdir exists.
+        let dir = Paths.fidoMigrationAckedMarker.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data().write(to: Paths.fidoMigrationAckedMarker, options: .atomic)
+        fidoMigrationDialogPresented = false
+    }
+
+    /// User-initiated reap of orphaned `ssh -fNM <alias>` processes.
+    /// Surfaced via the "Clean up N orphans" button in HostDetailCard.
+    func reapOrphans(for alias: String) {
+        let orphans = orphansByAlias[alias] ?? []
+        guard !orphans.isEmpty else { return }
+        Task {
+            let result = await OrphanReaper.reap(
+                alias: alias,
+                pids: orphans.map(\.pid),
+                engine: engine
+            )
+            if !result.pidsFailed.isEmpty {
+                lastError = "Couldn't reap \(result.pidsFailed.count) orphan(s) — they may have already exited or escalated privileges."
+            }
+            await refreshNow()
+        }
     }
 
     // MARK: - Coordinator-level mutation intents (dual-model fix)
@@ -307,6 +403,49 @@ final class AppCoordinator: ObservableObject {
     }
 
     @Published var interactiveAuthStates: [String: InteractiveAuthState] = [:]
+
+    /// Orphans detected per alias on the most recent scan. Refreshed by
+    /// `refreshNow()`. UI surfaces a "Clean up N orphans" chip in the
+    /// detail card when count > 0 AND master is not running for that
+    /// alias.
+    @Published var orphansByAlias: [String: [OrphanReaper.Orphan]] = [:]
+
+    /// Hosts surfaced in the one-time FIDO migration dialog: those
+    /// where `requiresInteractiveAuth==true` but ControlMaster isn't
+    /// effective (so connect would fail). Predicate is computed on
+    /// every snapshot; the dialog presents iff this is non-empty AND
+    /// the user hasn't already acked or fixed.
+    @Published var fidoMigrationCandidates: [HostSnapshot] = []
+    @Published var fidoMigrationDialogPresented: Bool = false
+
+    /// True once the acked marker file exists. Read fresh on every
+    /// refresh — file-truth, not @State cache — so dismissing/writing
+    /// the marker takes effect immediately on next render. Per
+    /// rubber-duck #11 to avoid the cache-bug class re-emerging on the
+    /// new dialog.
+    var fidoMigrationAcked: Bool {
+        FileManager.default.fileExists(atPath: Paths.fidoMigrationAckedMarker.path)
+    }
+
+    /// Derived auth state for the row chip. Combines the in-memory
+    /// transient state (`.authenticating`, `.failed`) with snapshot-
+    /// derived state (`.ready` when host requires FIDO AND master is
+    /// running). The `.ready` state is derived rather than stored so it
+    /// survives app restart for hosts whose master is still alive.
+    func authState(for host: HostSnapshot) -> InteractiveAuthState {
+        if let stored = interactiveAuthStates[host.alias] {
+            switch stored {
+            case .authenticating, .failed:
+                return stored
+            case .notRequired, .ready:
+                break  // fall through to derived
+            }
+        }
+        if host.requiresInteractiveAuth && host.controlMaster.status == .running {
+            return .ready
+        }
+        return .notRequired
+    }
 
     func connect(_ alias: String, newWindow: Bool = false) {
         Task {
