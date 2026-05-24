@@ -5,6 +5,7 @@ import BastionCore
 struct HostRow: View {
     let host: HostSnapshot
     @Binding var expanded: Bool
+    let authState: AppCoordinator.InteractiveAuthState
     let onConnect: () -> Void
 
     var body: some View {
@@ -12,8 +13,11 @@ struct HostRow: View {
             statusDot
                 .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text(host.alias)
-                    .font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 6) {
+                    Text(host.alias)
+                        .font(.system(size: 13, weight: .semibold))
+                    authChip
+                }
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -63,6 +67,27 @@ struct HostRow: View {
             }
         }()
         Circle().fill(color)
+    }
+
+    @ViewBuilder
+    private var authChip: some View {
+        switch authState {
+        case .notRequired, .ready:
+            EmptyView()
+        case .authenticating:
+            HStack(spacing: 3) {
+                ProgressView().controlSize(.mini)
+                Text("authenticating")
+                    .font(.caption2.weight(.medium))
+            }
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(.blue.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+        case .failed:
+            Text("auth failed")
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(.red.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+        }
     }
 }
 

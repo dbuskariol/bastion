@@ -24,6 +24,7 @@ struct MenuContentView: View {
                                 HostRow(
                                     host: host,
                                     expanded: binding(for: host.id),
+                                    authState: coordinator.interactiveAuthStates[host.alias] ?? .notRequired,
                                     onConnect: { coordinator.connect(host.alias) }
                                 )
                                 .contextMenu {
@@ -73,6 +74,8 @@ struct MenuContentView: View {
     private func contextMenu(for host: HostSnapshot) -> some View {
         Button("Connect")             { coordinator.connect(host.alias) }
         Button("Connect (new window)") { coordinator.connect(host.alias, newWindow: true) }
+        Button("Unlock for the day")  { coordinator.unlockMaster(host.alias) }
+            .help("Pre-authenticate so subsequent connects are instant for the ControlPersist window.")
         Divider()
         Button("Edit…")               { openEditor(for: host.alias) }
         Button("Copy ssh command")    { coordinator.copyConnectCommand(host.alias) }

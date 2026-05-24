@@ -261,6 +261,14 @@ struct BasicTab: View {
                     Spacer()
                 }
             }
+            Toggle("Requires interactive (FIDO/SSO) auth", isOn: $draft.requiresInteractiveAuth)
+                .font(.caption)
+            if draft.requiresInteractiveAuth {
+                Text("Connect will open `ssh -fNM` in your terminal so you can complete the browser/FIDO touch once. Bastion then opens a shell tab automatically when the master is ready, and every connect for the next ControlPersist window is instant.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
