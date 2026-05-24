@@ -36,7 +36,8 @@ struct MenuContentView: View {
                                         onDisconnect: { coordinator.disconnectMaster(host.alias) },
                                         onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
                                         onConnect: { coordinator.connect(host.alias) },
-                                        onEdit: { openEditor(for: host.alias) }
+                                        onEdit: { openEditor(for: host.alias) },
+                                        onDelete: { coordinator.deleteHost(host.alias) }
                                     )
                                 }
                             }

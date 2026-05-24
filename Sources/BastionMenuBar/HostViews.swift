@@ -92,40 +92,48 @@ struct HostRow: View {
 }
 
 /// Expanded diagnostics card for a host. Vigil's `ExpandableDiagnosticsCard`
-/// pattern. Polls remote info on-demand only.
+/// pattern. Polls remote info on-demand only. Each `row` is tap-to-copy
+/// with a fade-in / fade-out "Copied!" overlay.
 struct HostDetailCard: View {
     let host: HostSnapshot
     let onDisconnect: () -> Void
     let onCopyCommand: () -> Void
     let onConnect: () -> Void
     let onEdit: () -> Void
+    let onDelete: () -> Void
+    @State private var copiedField: String? = nil
+    @State private var confirmingDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Resolved address row.
-            row("Address", "\(host.hostname):\(host.port)")
-            if let user = host.user { row("User", user) }
+            copyableRow(key: "Address", value: "\(host.hostname):\(host.port)")
+            if let user = host.user { copyableRow(key: "User", value: user) }
             if !host.identityFiles.isEmpty {
-                row("Identity", host.identityFiles.joined(separator: ", "))
+                copyableRow(key: "Identity", value: host.identityFiles.joined(separator: ", "))
             }
+            copyableRow(key: "SSH command", value: "ssh \(host.alias)")
             // Master block (only when configured).
             if host.controlMaster.enabled {
                 Divider().padding(.vertical, 2)
-                row("Master", host.controlMaster.status.rawValue.capitalized)
+                row(key: "Master", value: host.controlMaster.status.rawValue.capitalized)
                 if let pid = host.controlMaster.pid {
-                    row("PID", "\(pid)")
+                    copyableRow(key: "PID", value: "\(pid)")
                 }
                 if let channels = host.controlMaster.attachedSessions {
-                    row("Sessions", "\(channels)")
+                    row(key: "Sessions", value: "\(channels)")
                 }
                 if let persist = host.controlMaster.persistSeconds, persist > 0 {
-                    row("Persist", "\(persist / 60)m")
+                    row(key: "Persist", value: "\(persist / 60)m")
                 }
                 if let uptimeSeconds = host.uptimeSeconds, uptimeSeconds > 0 {
-                    row("Uptime", formatDuration(uptimeSeconds))
+                    row(key: "Uptime", value: formatDuration(uptimeSeconds))
                 }
                 if let lastChecked = host.controlMaster.lastCheckedAt {
-                    row("Checked", Self.timeFormatter.string(from: lastChecked))
+                    row(key: "Checked", value: Self.timeFormatter.string(from: lastChecked))
+                }
+                if let socketPath = host.controlMaster.controlPath {
+                    copyableRow(key: "Socket", value: socketPath)
                 }
             }
             if let lastError = host.lastError {
@@ -149,23 +157,95 @@ struct HostDetailCard: View {
                     Button("Disconnect", role: .destructive, action: onDisconnect)
                         .buttonStyle(.bordered)
                 }
-                Button("Copy ssh", action: onCopyCommand)
-                    .buttonStyle(.bordered)
                 Spacer()
+                Button(role: .destructive) {
+                    confirmingDelete = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.bordered)
+                .help("Delete this host")
             }
             .font(.caption)
         }
         .padding(8)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+        .confirmationDialog(
+            "Delete \(host.alias)?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(host.alias)", role: .destructive) { onDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the host from Bastion (hosts.json) and from ~/.ssh/config.d/bastion.conf. Generated SSH keys in ~/.ssh/ are left in place.")
+        }
     }
 
+    // MARK: - Row builders
+
+    /// Non-interactive row (e.g. Master status).
     @ViewBuilder
-    private func row(_ key: String, _ value: String) -> some View {
+    private func row(key: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(key).font(.caption).foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
             Text(value).font(.caption.monospaced())
             Spacer()
+        }
+    }
+
+    /// Tap-to-copy row. Shows a "Copied" overlay that fades in then out.
+    @ViewBuilder
+    private func copyableRow(key: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(key).font(.caption).foregroundStyle(.secondary)
+                .frame(width: 70, alignment: .leading)
+            ZStack(alignment: .leading) {
+                Text(value)
+                    .font(.caption.monospaced())
+                    .opacity(copiedField == key ? 0.25 : 1)
+                if copiedField == key {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Copied")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.green)
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+            }
+            Spacer()
+            Image(systemName: "doc.on.doc")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(copiedField == key ? Color.green.opacity(0.08) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { copy(key: key, value: value) }
+        .help("Click to copy")
+    }
+
+    private func copy(key: String, value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        withAnimation(.easeInOut(duration: 0.18)) {
+            copiedField = key
+        }
+        // Reset after a short hold.
+        Task {
+            try? await Task.sleep(for: .milliseconds(1100))
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if copiedField == key { copiedField = nil }
+                }
+            }
         }
     }
 
