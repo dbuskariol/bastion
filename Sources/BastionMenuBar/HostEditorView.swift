@@ -25,6 +25,7 @@ struct HostEditorView: View {
     @State private var isSaving = false
     @State private var saveError: String?
     @State private var renameWarning: String?
+    @State private var savedAt: Date? = nil
     let originalAlias: String?
     let onSaved: () -> Void
     let onCancel: () -> Void
@@ -75,7 +76,7 @@ struct HostEditorView: View {
             Text(originalAlias == nil ? "New Host" : "Edit \(originalAlias!)")
                 .font(.headline)
             Spacer()
-            Button("Cancel", action: onCancel)
+            Button(savedAt == nil ? "Cancel" : "Done", action: onCancel)
                 .keyboardShortcut(.escape)
             Button("Save", action: save)
                 .keyboardShortcut(.return)
@@ -104,6 +105,11 @@ struct HostEditorView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if savedAt != nil {
+                Label("Saved ✓ — click Done to close.", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -114,17 +120,25 @@ struct HostEditorView: View {
         Task {
             isSaving = true
             saveError = nil
-            do {
-                let result = try await coordinator.engine.upsertHost(draft)
+            // Route through coordinator intent so menuRevision bumps and
+            // the popover subtree remounts (deterministic kill for the
+            // MenuBarExtra cache-staleness bug).
+            if let result = await coordinator.upsertHost(draft) {
                 if !result.integrationPassed {
                     validationMessage = "Saved, but ssh -G reported effective-config mismatches — \(result.integrationMismatches.keys.joined(separator: ", "))"
                 } else {
                     validationMessage = "Saved and ssh -G validated."
                 }
-                _ = await coordinator.refreshNow()
-                onSaved()
-            } catch {
-                saveError = "\(error)"
+                savedAt = Date()
+                // Don't auto-close — user clicks the "Done" button (was
+                // "Cancel" before save) when they've confirmed the row
+                // is in the popover. This avoids the previous UX bug
+                // where the editor closed and the user couldn't tell
+                // whether their change took effect.
+            } else if let err = coordinator.lastError {
+                saveError = err
+            } else {
+                saveError = "Save failed — see logs."
             }
             isSaving = false
         }

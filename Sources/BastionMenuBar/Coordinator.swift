@@ -25,20 +25,29 @@ final class AppCoordinator: ObservableObject {
     @Published var lastMessage: String = "Loading…"
     @Published var defaultTerminal: TerminalID? = nil
     @Published var isRefreshing: Bool = false
-    @Published var lastConnectError: String? = nil
+    @Published var lastError: String? = nil
 
-    /// Derived from `status` after every refresh. The MenuBarExtra
-    /// `label:` closure reads ONLY this, not `status`. Without that
-    /// separation, the App scene's body subscribes to every `@Published`
-    /// mutation on the coordinator (status / lastMessage / isRefreshing,
-    /// three publishes per refresh, every 5 s while the popover is
-    /// open), which invalidates the whole scene and re-runs the
-    /// MenuBarExtra `content:` closure. On macOS 13 that causes the
-    /// MenuBarExtra(.window) popover's hosting NSPanel to keep its
-    /// originally-captured `MenuContentView` whose observation latched
-    /// against the initial empty `StatusReport` — so the popover never
-    /// shows newer hosts even though `lastMessage` updates. Diagnosed
-    /// via dual-model consensus.
+    /// Per dual-model consensus: bumped on every registry mutation
+    /// (add / update / delete / import). `MenuContentView` attaches
+    /// `.id(menuRevision)` to its root VStack so a registry change
+    /// forces SwiftUI to discard the cached subtree (and any stale
+    /// `MenuBarExtra(.window)` panel state) and mount fresh. NOT bumped
+    /// on `refreshNow` polling ticks — only on user-initiated mutations
+    /// — so scroll position and expanded-row state are preserved on
+    /// periodic refreshes.
+    @Published private(set) var menuRevision: Int = 0
+
+    /// Per dual-model consensus: bumped before every `refreshNow()`
+    /// invocation. Each Task captures the current generation; if a
+    /// newer refresh has started before this one finishes, the older
+    /// one's assignment to `self.status` is dropped. Fixes the race
+    /// where a polling refresh started just before a host-add finishes
+    /// after the save-triggered refresh and overwrites it.
+    private var refreshGeneration: Int = 0
+
+    /// Derived view-model the MenuBarExtra `label:` closure reads
+    /// instead of `coordinator.status` directly. Equatable so we can
+    /// guard re-publishes — most refreshes leave it unchanged.
     @Published private(set) var menuBarBadge: MenuBarBadge = .empty
 
     let engine = ConnectionEngine()
@@ -111,9 +120,19 @@ final class AppCoordinator: ObservableObject {
 
     @discardableResult
     func refreshNow() async -> StatusReport {
+        // Race guard: capture our generation; drop our assignment if a
+        // newer refreshNow() has started.
+        refreshGeneration += 1
+        let myGen = refreshGeneration
+
         isRefreshing = true
         defer { isRefreshing = false }
         let report = await engine.snapshot(appVersion: BastionVersion.value)
+
+        // If a newer refresh started while we were snapshotting, drop
+        // our result so the newer (or in-flight) one wins.
+        guard myGen == refreshGeneration else { return report }
+
         await detectAndNotifyTransitions(newReport: report)
         let newBadge = MenuBarBadge(
             anyMasterAlive: report.hosts.contains { $0.controlMaster.status == .running },
@@ -121,12 +140,106 @@ final class AppCoordinator: ObservableObject {
         )
         self.status = report
         self.lastMessage = "Updated \(Self.timeFormatter.string(from: report.generatedAt))"
-        // Equatable guard: avoid invalidating the App scene unless the
-        // badge actually changed. Most refreshes leave it unchanged.
         if newBadge != self.menuBarBadge {
             self.menuBarBadge = newBadge
         }
         return report
+    }
+
+    // MARK: - Coordinator-level mutation intents (dual-model fix)
+    //
+    // All view-driven registry mutations funnel through here so we can:
+    //   1. bump `menuRevision` (forces `.id(...)`-based remount of the
+    //      popover subtree — the deterministic kill for MenuBarExtra
+    //      panel-cache staleness),
+    //   2. centralise error surfacing into `lastError`,
+    //   3. always refreshNow after a mutation,
+    //   4. provide one diff-able log point for future bugs of this class.
+
+    @discardableResult
+    func upsertHost(_ host: ManagedHost, skipIntegrationPass: Bool = false) async -> ManagedConfigWriteResult? {
+        do {
+            let result = try await engine.upsertHost(host, skipIntegrationPass: skipIntegrationPass)
+            menuRevision &+= 1
+            await refreshNow()
+            return result
+        } catch {
+            lastError = "Save failed: \(error)"
+            return nil
+        }
+    }
+
+    func deleteHost(_ alias: String) {
+        Task {
+            // Optimistic UI: rebuild the StatusReport using its own
+            // initializer signature is brittle (every new field becomes
+            // a silent break). Mutate the field directly instead — it's
+            // a var on a struct, the struct lives in @Published var
+            // status, so direct mutation triggers objectWillChange.
+            var pruned = status
+            pruned.hosts.removeAll { $0.alias.lowercased() == alias.lowercased() }
+            self.status = pruned
+            interactiveAuthStates.removeValue(forKey: alias)
+            menuRevision &+= 1
+            do {
+                try await engine.removeHost(alias)
+                await refreshNow()
+            } catch {
+                lastError = "Delete failed for \(alias): \(error)"
+                // Re-fetch so the row reappears if delete actually failed.
+                await refreshNow()
+            }
+        }
+    }
+
+    /// Inject the sentinel-guarded `Include` block into ~/.ssh/config
+    /// and refresh status so the header warning chip disappears.
+    func installSSHConfigInclude() {
+        Task {
+            do {
+                _ = try engine.scanner.ensureIncludeInstalled()
+                menuRevision &+= 1
+                await refreshNow()
+            } catch {
+                lastError = "Couldn't install Include: \(error)"
+            }
+        }
+    }
+
+    /// Apply a batch of import candidates as managed hosts. Used by
+    /// onboarding's import step and by `bastion import --apply`. Skips
+    /// already-managed candidates by alias collision (case-insensitive).
+    @discardableResult
+    func applyImportCandidates(
+        _ candidates: [ImportCandidate],
+        controlMaster: ControlMasterChoice = .inherit,
+        controlPersist: ControlPersistChoice = .inherit
+    ) async -> (applied: Int, skipped: Int) {
+        var applied = 0
+        var skipped = 0
+        for candidate in candidates where !candidate.alreadyManaged {
+            let host = ManagedHost(
+                alias: candidate.suggestedAlias,
+                hostname: candidate.hostname,
+                user: candidate.user,
+                port: candidate.port,
+                identityFiles: candidate.identityFiles,
+                controlMaster: controlMaster,
+                controlPersist: controlPersist
+            )
+            do {
+                _ = try await engine.upsertHost(host, skipIntegrationPass: true)
+                applied += 1
+            } catch {
+                skipped += 1
+                lastError = "Skipped \(candidate.suggestedAlias): \(error)"
+            }
+        }
+        if applied > 0 {
+            menuRevision &+= 1
+            await refreshNow()
+        }
+        return (applied, skipped)
     }
 
     /// Compare the new report against `lastAliveHosts` and dispatch
@@ -196,9 +309,18 @@ final class AppCoordinator: ObservableObject {
     @Published var interactiveAuthStates: [String: InteractiveAuthState] = [:]
 
     func connect(_ alias: String, newWindow: Bool = false) {
+        // Optimistic UI: if the host needs interactive auth, flip the
+        // chip to `.authenticating` synchronously so the user sees
+        // immediate feedback. (Without this, the chip didn't change
+        // until after the multi-hundred-ms `ssh -O check` returned.)
+        if let host = (try? engine.loadRegistry())?.host(named: alias),
+           host.requiresInteractiveAuth {
+            interactiveAuthStates[alias] = .authenticating(since: Date())
+        }
         Task {
             guard let terminalID = defaultTerminal else {
-                lastConnectError = "No default terminal set. Open Preferences to pick one."
+                lastError = "No default terminal set. Open Preferences to pick one."
+                interactiveAuthStates.removeValue(forKey: alias)
                 return
             }
             let launcher = factory.launcher(for: terminalID)
@@ -209,6 +331,7 @@ final class AppCoordinator: ObservableObject {
             let state = (try? await engine.checkMaster(alias))
                         ?? ControlMasterState(status: .unknown)
             if state.status == .running {
+                interactiveAuthStates[alias] = .ready
                 launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
                 return
             }
@@ -222,7 +345,7 @@ final class AppCoordinator: ObservableObject {
             // auto-open the shell tab. Per dual-model consensus we
             // never automate the auth touch or the Enter keystroke.
             if host?.requiresInteractiveAuth == true {
-                interactiveAuthStates[alias] = .authenticating(since: Date())
+                // (Already set to .authenticating above for instant UI.)
                 launch(
                     launcher: launcher,
                     argv: ["ssh", "-fNM",
@@ -275,14 +398,16 @@ final class AppCoordinator: ObservableObject {
     /// every subsequent Connect is instant for the rest of the
     /// ControlPersist window.
     func unlockMaster(_ alias: String) {
+        // Optimistic synchronous flip so the chip changes immediately.
+        interactiveAuthStates[alias] = .authenticating(since: Date())
         Task {
             guard let terminalID = defaultTerminal else {
-                lastConnectError = "No default terminal set."
+                lastError = "No default terminal set."
+                interactiveAuthStates.removeValue(forKey: alias)
                 return
             }
             let launcher = factory.launcher(for: terminalID)
             let env = engine.pathResolver.environment()
-            interactiveAuthStates[alias] = .authenticating(since: Date())
             launch(
                 launcher: launcher,
                 argv: ["ssh", "-fNM",
@@ -309,11 +434,11 @@ final class AppCoordinator: ObservableObject {
     private func launch(launcher: TerminalLauncher, argv: [String], newWindow: Bool, env: [String: String]) {
         do {
             try launcher.launch(argv: argv, newWindow: newWindow, environment: env)
-            lastConnectError = nil
+            lastError = nil
         } catch let error as TerminalLaunchError {
-            lastConnectError = error.description
+            lastError = error.description
         } catch {
-            lastConnectError = error.localizedDescription
+            lastError = error.localizedDescription
         }
     }
 
@@ -321,17 +446,6 @@ final class AppCoordinator: ObservableObject {
         Task {
             _ = try? await engine.stopMaster(alias)
             await refreshNow()
-        }
-    }
-
-    func deleteHost(_ alias: String) {
-        Task {
-            do {
-                try await engine.removeHost(alias)
-                await refreshNow()
-            } catch {
-                lastConnectError = "Delete failed: \(error)"
-            }
         }
     }
 
@@ -352,19 +466,6 @@ final class AppCoordinator: ObservableObject {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         proc.arguments = ["-t", Paths.managedConfigFile.path]
         try? proc.run()
-    }
-
-    /// Inject the sentinel-guarded `Include` block into ~/.ssh/config and
-    /// refresh status so the header warning chip disappears.
-    func installSSHConfigInclude() {
-        Task {
-            do {
-                _ = try engine.scanner.ensureIncludeInstalled()
-                await refreshNow()
-            } catch {
-                lastConnectError = "Couldn't install Include: \(error)"
-            }
-        }
     }
 }
 

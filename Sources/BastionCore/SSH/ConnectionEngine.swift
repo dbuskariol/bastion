@@ -125,10 +125,11 @@ public final class ConnectionEngine: @unchecked Sendable {
         guard let host = registry.host(named: alias) else {
             throw EngineError.unknownAlias(alias)
         }
-        // If a live master is present, close it first so we don't leak
-        // the orphan socket (rubber-duck N8).
-        let state = try await checkMaster(alias)
-        if state.status == .running {
+        // Best-effort: try to close a live master so we don't leak the
+        // orphan socket. Never let a failing master probe block the
+        // delete itself — the user wants the host gone, not a
+        // network round-trip diagnostic.
+        if let state = try? await checkMaster(alias), state.status == .running {
             _ = try? await stopMaster(alias)
         }
         registry.remove(host.id)

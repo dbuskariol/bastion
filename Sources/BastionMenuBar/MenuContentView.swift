@@ -4,6 +4,13 @@ import BastionIdentifiers
 
 /// The main popover content. Vigil's `MenuContentView` shape adapted to
 /// Bastion's host-list use case.
+///
+/// Per dual-model consensus, the root `VStack` carries
+/// `.id(coordinator.menuRevision)` so any registry mutation (add /
+/// edit / delete / import) forces SwiftUI to discard this subtree and
+/// mount a fresh one. That bypasses the macOS 13 MenuBarExtra(.window)
+/// hosting-view cache that otherwise leaves the popover showing stale
+/// state until the app is restarted.
 struct MenuContentView: View {
     @EnvironmentObject var coordinator: AppCoordinator
     @EnvironmentObject var updateController: UpdateController
@@ -14,11 +21,16 @@ struct MenuContentView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            errorBanner
+            // Eager VStack (not LazyVStack) — at <=200 hosts in a 380pt
+            // popover, virtualisation cost is trivial and we avoid the
+            // class of macOS 13 SwiftUI bugs where lazy children fail
+            // to materialise after a hosting-view cycle.
             if coordinator.status.hosts.isEmpty {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    VStack(spacing: 4) {
                         ForEach(coordinator.status.hosts) { host in
                             VStack(spacing: 4) {
                                 HostRow(
@@ -51,9 +63,41 @@ struct MenuContentView: View {
             Divider()
             footer
         }
+        .id(coordinator.menuRevision)
         .frame(width: 380)
-        .onAppear { coordinator.popoverDidOpen() }
+        .onAppear {
+            #if DEBUG
+            print("[MenuContentView] onAppear menuRevision=\(coordinator.menuRevision) hosts=\(coordinator.status.hosts.count)")
+            #endif
+            coordinator.popoverDidOpen()
+        }
         .onDisappear { coordinator.popoverDidClose() }
+    }
+
+    @ViewBuilder
+    private var errorBanner: some View {
+        if let err = coordinator.lastError {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.octagon.fill")
+                    .foregroundStyle(.red)
+                Text(err)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button {
+                    coordinator.lastError = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.red.opacity(0.08))
+            Divider()
+        }
     }
 
     private func openEditor(for alias: String? = nil) {

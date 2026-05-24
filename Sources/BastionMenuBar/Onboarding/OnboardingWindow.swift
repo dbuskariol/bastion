@@ -180,33 +180,16 @@ struct OnboardingWindow: View {
     }
 
     private func applyInclude() {
-        Task {
-            do {
-                let outcome = try coordinator.engine.scanner.ensureIncludeInstalled()
-                model.includeInstalled = (outcome != .noopBecauseUserHasCoveringInclude)
-                await coordinator.refreshNow()
-            } catch {
-                model.lastError = "Install Include failed: \(error)"
-            }
-        }
+        coordinator.installSSHConfigInclude()
+        model.includeInstalled = true
     }
 
     private func applySelectedImport() {
         let chosen = model.importCandidates.filter { model.importSelections.contains($0.id) }
         Task {
-            for candidate in chosen {
-                let host = ManagedHost(
-                    alias: candidate.suggestedAlias,
-                    hostname: candidate.hostname,
-                    user: candidate.user,
-                    port: candidate.port,
-                    identityFiles: candidate.identityFiles,
-                    controlMaster: model.enableControlMasterDefault ? .on : .inherit,
-                    controlPersist: model.enableControlMasterDefault ? model.controlPersist : .inherit
-                )
-                _ = try? await coordinator.engine.upsertHost(host, skipIntegrationPass: true)
-            }
-            await coordinator.refreshNow()
+            let cmChoice: ControlMasterChoice = model.enableControlMasterDefault ? .on : .inherit
+            let persistChoice: ControlPersistChoice = model.enableControlMasterDefault ? model.controlPersist : .inherit
+            _ = await coordinator.applyImportCandidates(chosen, controlMaster: cmChoice, controlPersist: persistChoice)
         }
     }
 }
