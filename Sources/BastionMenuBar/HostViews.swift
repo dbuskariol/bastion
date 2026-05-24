@@ -72,8 +72,23 @@ struct HostRow: View {
     @ViewBuilder
     private var authChip: some View {
         switch authState {
-        case .notRequired, .ready:
+        case .notRequired:
             EmptyView()
+        case .ready:
+            // Industry-standard "session token" chip — shows remaining
+            // ControlPersist lifetime like `gh auth status` /
+            // `aws sso login` countdowns. Computed from the snapshot
+            // (master's establishedAt + ControlPersist) so the value
+            // is correct across menu-app restarts.
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.caption2)
+                Text(authReadyLabel)
+                    .font(.caption2.weight(.medium))
+            }
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(.green.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+            .foregroundStyle(.green)
         case .authenticating:
             HStack(spacing: 3) {
                 ProgressView().controlSize(.mini)
@@ -89,6 +104,30 @@ struct HostRow: View {
                 .background(.red.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
         }
     }
+
+    /// "auth · 7h 42m" / "auth · 23m" / "auth · indefinite"
+    private var authReadyLabel: String {
+        let persist = host.controlMaster.persistSeconds ?? 0
+        if persist == 0 {
+            // ControlPersist yes (indefinite) or unparsed.
+            return "auth · indefinite"
+        }
+        let uptime = host.uptimeSeconds ?? 0
+        let remaining = max(0, persist - uptime)
+        if remaining == 0 {
+            return "auth · expiring"
+        }
+        return "auth · " + Self.shortDuration(remaining)
+    }
+
+    private static func shortDuration(_ seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        if h > 0 && m > 0 { return "\(h)h \(m)m left" }
+        if h > 0          { return "\(h)h left" }
+        if m > 0          { return "\(m)m left" }
+        return "<1m left"
+    }
 }
 
 /// Expanded diagnostics card for a host. Vigil's `ExpandableDiagnosticsCard`
@@ -101,6 +140,9 @@ struct HostDetailCard: View {
     let onConnect: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    let onUnlock: () -> Void
+    let orphanCount: Int
+    let onReapOrphans: () -> Void
     @State private var copiedField: String? = nil
     @State private var confirmingDelete = false
 
@@ -134,6 +176,22 @@ struct HostDetailCard: View {
                 }
                 if let socketPath = host.controlMaster.controlPath {
                     copyableRow(key: "Socket", value: socketPath)
+                    // Parity check: when Bastion wrote ControlPath=~/.ssh/sockets/%C
+                    // but the effective config resolved to something
+                    // else, the user has a global override (e.g. a
+                    // `Host *` block above the Bastion Include).
+                    // That's fine, but worth flagging so the user
+                    // knows non-Bastion clients see a different path.
+                    if !socketPath.contains("/sockets/") {
+                        HStack(alignment: .top, spacing: 4) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.blue)
+                            Text("Your ~/.ssh/config overrides Bastion's ControlPath — that's fine, every ssh client (git, vscode, CLI) sees the same path.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             if let lastError = host.lastError {
@@ -148,8 +206,36 @@ struct HostDetailCard: View {
                         .lineLimit(3)
                 }
             }
+            if orphanCount > 0 {
+                // Detect-only surface for stranded `ssh -fNM <alias>`
+                // processes from previous failed bootstraps. User
+                // initiates the cleanup; never auto-reap to avoid
+                // racing a legitimate spawning master.
+                Divider().padding(.vertical, 2)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .foregroundStyle(.orange)
+                    Text("\(orphanCount) orphaned `ssh -fNM` from previous attempt")
+                        .font(.caption)
+                    Spacer()
+                    Button("Clean up", action: onReapOrphans)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
             HStack(spacing: 8) {
-                Button("Open Terminal", action: onConnect)
+                // For FIDO hosts whose master isn't running, promote
+                // "Unlock for the day" to the primary action — matches
+                // the industry-standard "establish session token" UX of
+                // `gh auth login`, `aws sso login`, `op signin`.
+                if host.requiresInteractiveAuth && host.controlMaster.status != .running {
+                    Button(action: onUnlock) {
+                        Label("Unlock for the day", systemImage: "lock.open.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Authenticate now so every subsequent connect for the persist window is instant.")
+                }
+                Button(host.controlMaster.status == .running ? "Open shell" : "Open Terminal", action: onConnect)
                     .buttonStyle(.bordered)
                 Button("Edit", action: onEdit)
                     .buttonStyle(.bordered)
