@@ -8,9 +8,7 @@ struct MenuContentView: View {
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var updateController: UpdateController
     @State private var expandedHostIDs: Set<UUID> = []
-    @State private var editorDraft: ManagedHost?
-    @State private var editorOriginalAlias: String?
-    @State private var showingEditor = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,7 +35,7 @@ struct MenuContentView: View {
                                         onDisconnect: { coordinator.disconnectMaster(host.alias) },
                                         onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
                                         onConnect: { coordinator.connect(host.alias) },
-                                        onEdit: { openEditor(for: host) }
+                                        onEdit: { openEditor(for: host.alias) }
                                     )
                                 }
                             }
@@ -54,37 +52,11 @@ struct MenuContentView: View {
         .frame(width: 380)
         .onAppear { coordinator.popoverDidOpen() }
         .onDisappear { coordinator.popoverDidClose() }
-        .sheet(isPresented: $showingEditor) {
-            if let _ = editorDraft {
-                HostEditorView(
-                    coordinator: coordinator,
-                    draft: Binding(
-                        get: { editorDraft ?? ManagedHost(alias: "new", hostname: "") },
-                        set: { editorDraft = $0 }
-                    ),
-                    originalAlias: editorOriginalAlias,
-                    onSaved: { showingEditor = false },
-                    onCancel: { showingEditor = false }
-                )
-            }
-        }
     }
 
-    private func openEditor(for host: HostSnapshot? = nil) {
-        if let host {
-            let registry = (try? coordinator.engine.loadRegistry()) ?? HostRegistry()
-            if let existing = registry.host(named: host.alias) {
-                editorDraft = existing
-                editorOriginalAlias = existing.alias
-            } else {
-                editorDraft = nil
-                editorOriginalAlias = nil
-            }
-        } else {
-            editorDraft = ManagedHost(alias: "new-host", hostname: "")
-            editorOriginalAlias = nil
-        }
-        showingEditor = true
+    private func openEditor(for alias: String? = nil) {
+        coordinator.openHostEditor(for: alias)
+        openWindow(id: "bastion.host-editor")
     }
 
     private func binding(for hostID: UUID) -> Binding<Bool> {
@@ -102,7 +74,7 @@ struct MenuContentView: View {
         Button("Connect")             { coordinator.connect(host.alias) }
         Button("Connect (new window)") { coordinator.connect(host.alias, newWindow: true) }
         Divider()
-        Button("Edit…")               { openEditor(for: host) }
+        Button("Edit…")               { openEditor(for: host.alias) }
         Button("Copy ssh command")    { coordinator.copyConnectCommand(host.alias) }
         Button("Open in ~/.ssh/config") { coordinator.openManagedConfig() }
         if host.controlMaster.status == .running || host.controlMaster.status == .stale {

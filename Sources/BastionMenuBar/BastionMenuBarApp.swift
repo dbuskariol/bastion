@@ -31,6 +31,16 @@ struct BastionMenuBarApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        // Separate Window scene for the host editor so it survives the
+        // popover closing on focus shift (MenuBarExtra(.window) closes
+        // the popover the moment focus moves out of it, which it does
+        // the instant a sheet tries to take input — issue #2 in user feedback).
+        Window("Host", id: "bastion.host-editor") {
+            HostEditorWindow(coordinator: coordinator)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }
 

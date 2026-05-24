@@ -91,7 +91,7 @@ struct BastionCLI {
           bastion config sync
           bastion config install-include
           bastion config remove-include
-          bastion import <source> [--apply] [--json]
+          bastion import <source> [--apply] [--json] [--sort {recent|most-used|alphabetical}]
                   source = zsh|bash|fish|known-hosts|ssh-config|all
           bastion uninstall [--keep-keys]
         """)

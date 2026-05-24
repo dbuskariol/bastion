@@ -130,6 +130,7 @@ struct TerminalScreen: View {
 
 struct ImportScreen: View {
     @ObservedObject var model: OnboardingModel
+    @State private var searchText: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -148,24 +149,85 @@ struct ImportScreen: View {
                     .foregroundStyle(.secondary)
             } else {
                 HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search alias, host, user…", text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                }
+                .font(.caption)
+
+                HStack {
                     Button("Select all") {
-                        model.importSelections = Set(model.importCandidates.filter { !$0.alreadyManaged }.map { $0.id })
+                        model.importSelections = Set(filteredAndSortedCandidates.filter { !$0.alreadyManaged }.map { $0.id })
                     }
                     Button("None") { model.importSelections.removeAll() }
                     Spacer()
-                    Text("\(model.importSelections.count) of \(model.importCandidates.count) selected")
+                    Picker("Sort", selection: $model.importSortMode) {
+                        ForEach(ImportSortMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Text("\(model.importSelections.count) of \(filteredAndSortedCandidates.count) selected")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .font(.caption)
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(model.importCandidates, id: \.id) { candidate in
+                        ForEach(filteredAndSortedCandidates, id: \.id) { candidate in
                             ImportRow(candidate: candidate, selections: $model.importSelections)
                         }
                     }
                 }
                 .frame(maxHeight: 240)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
+    /// Re-sort live whenever the picker changes (cheap — ~hundreds of
+    /// candidates max).
+    private var filteredAndSortedCandidates: [ImportCandidate] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered: [ImportCandidate]
+        if trimmed.isEmpty {
+            filtered = model.importCandidates
+        } else {
+            filtered = model.importCandidates.filter { candidate in
+                candidate.suggestedAlias.lowercased().contains(trimmed)
+                    || candidate.hostname.lowercased().contains(trimmed)
+                    || (candidate.user?.lowercased().contains(trimmed) ?? false)
+            }
+        }
+        return sortCandidates(filtered)
+    }
+
+    private func sortCandidates(_ candidates: [ImportCandidate]) -> [ImportCandidate] {
+        switch model.importSortMode {
+        case .recent:
+            return candidates.sorted { lhs, rhs in
+                let lk = lhs.lastSeen ?? .distantPast
+                let rk = rhs.lastSeen ?? .distantPast
+                if lk != rk { return lk > rk }
+                if lhs.invocationCount != rhs.invocationCount {
+                    return lhs.invocationCount > rhs.invocationCount
+                }
+                return lhs.suggestedAlias.lowercased() < rhs.suggestedAlias.lowercased()
+            }
+        case .mostUsed:
+            return candidates.sorted { lhs, rhs in
+                if lhs.invocationCount != rhs.invocationCount {
+                    return lhs.invocationCount > rhs.invocationCount
+                }
+                let lk = lhs.lastSeen ?? .distantPast
+                let rk = rhs.lastSeen ?? .distantPast
+                if lk != rk { return lk > rk }
+                return lhs.suggestedAlias.lowercased() < rhs.suggestedAlias.lowercased()
+            }
+        case .alphabetical:
+            return candidates.sorted {
+                $0.suggestedAlias.lowercased() < $1.suggestedAlias.lowercased()
             }
         }
     }

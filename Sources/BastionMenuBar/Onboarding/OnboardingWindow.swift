@@ -39,6 +39,7 @@ final class OnboardingModel: ObservableObject {
     @Published var selectedTerminal: TerminalID?
     @Published var importCandidates: [ImportCandidate] = []
     @Published var importSelections: Set<ParsedConnection.DedupKey> = []
+    @Published var importSortMode: ImportSortMode = .recent
     @Published var enableControlMasterDefault: Bool = false
     @Published var controlPersist: ControlPersistChoice = .hours(8)
     @Published var openAtLogin: Bool = false

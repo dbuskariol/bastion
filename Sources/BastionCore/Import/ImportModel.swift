@@ -123,28 +123,23 @@ public struct ImportCandidate: Hashable, Sendable, Identifiable, Codable {
     }
 }
 
-/// What the user picks during import: a subset of candidates plus their
-/// possibly-edited alias values.
-public struct ImportSelection: Sendable {
-    public var chosen: [ImportCandidate]
+/// Sort modes for ImportEngine.discover output.
+public enum ImportSortMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    /// Most recently used first. Default — matches the consensus brief
+    /// (lastSeen desc; falls back to invocationCount desc for ties).
+    case recent
+    /// Most-frequently-invoked first (invocationCount desc; ties broken
+    /// by lastSeen desc then alias asc).
+    case mostUsed
+    /// Alphabetical by suggested alias (case-insensitive).
+    case alphabetical
 
-    public init(chosen: [ImportCandidate]) { self.chosen = chosen }
-
-    /// Convert the chosen candidates into ManagedHosts ready to upsert.
-    public func toManagedHosts(controlMaster: ControlMasterChoice = .inherit,
-                               controlPersist: ControlPersistChoice = .inherit) -> [ManagedHost] {
-        chosen.map { candidate in
-            ManagedHost(
-                alias: candidate.suggestedAlias,
-                hostname: candidate.hostname,
-                user: candidate.user,
-                port: candidate.port,
-                identityFiles: candidate.identityFiles,
-                controlMaster: controlMaster,
-                controlPersist: controlPersist,
-                tags: [],
-                notes: ""
-            )
+    public var id: String { rawValue }
+    public var displayName: String {
+        switch self {
+        case .recent:       return "Most recent"
+        case .mostUsed:     return "Most used"
+        case .alphabetical: return "Alphabetical"
         }
     }
 }

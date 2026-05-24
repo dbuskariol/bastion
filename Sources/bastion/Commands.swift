@@ -331,7 +331,14 @@ func runImport(_ args: [String]) async throws -> Int32 {
     }
     let registry = try engine.loadRegistry()
     let importer = ImportEngine(registry: registry)
-    let candidates = importer.discover(sources: [source])
+    let sortMode: ImportSortMode = {
+        switch flags.first("sort")?.lowercased() {
+        case "most-used", "mostused", "used": return .mostUsed
+        case "alpha", "alphabetical":         return .alphabetical
+        default:                              return .recent
+        }
+    }()
+    let candidates = importer.discover(sources: [source], sortMode: sortMode)
     if flags.bool("json") {
         try printJSON(candidates)
     } else {
