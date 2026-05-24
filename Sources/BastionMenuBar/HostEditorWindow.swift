@@ -2,44 +2,40 @@ import SwiftUI
 import AppKit
 import BastionCore
 
-/// Container view for the host editor Window scene. Wires the
-/// coordinator's HostEditorState into a HostEditorView that lives in its
-/// own native window — so MenuBarExtra(.window) closing the popover on
-/// focus shift doesn't take the editor with it.
+/// Container view for the host editor Window scene. Resolves the
+/// coordinator from the environment and delegates to an inner
+/// view that holds the editor state as @ObservedObject — without that
+/// wrapping, the `Binding(get:set:)` we'd need to construct here
+/// wouldn't re-evaluate when state.draft changes, so TextField /
+/// Toggle / Picker bindings would only flush on the next external
+/// re-render (e.g. moving focus, clicking elsewhere). The wrapper is
+/// the SwiftUI-canonical fix for binding through nested ObservableObjects.
 struct HostEditorWindow: View {
     @EnvironmentObject var coordinator: AppCoordinator
-    @ObservedObject private var state: HostEditorState
-    private weak var coordinatorRef: AppCoordinator?
-
-    init() {
-        // SwiftUI Window content init is called before the
-        // environment is resolved, so we can't read @EnvironmentObject
-        // here. The state binding happens lazily in body via the
-        // resolved coordinator from the environment.
-        // Use a placeholder; body switches to coordinator.editorState.
-        self.state = HostEditorState()
-    }
 
     var body: some View {
-        // Always read state from the *environment-resolved* coordinator,
-        // never from the placeholder we constructed in init.
-        let liveState = coordinator.editorState
+        HostEditorWindowContent(state: coordinator.editorState, coordinator: coordinator)
+            .managesActivationPolicy(identifierPrefix: "bastion.host-editor")
+    }
+}
+
+private struct HostEditorWindowContent: View {
+    @ObservedObject var state: HostEditorState
+    let coordinator: AppCoordinator
+
+    var body: some View {
         HostEditorView(
             coordinator: coordinator,
-            draft: Binding(
-                get: { liveState.draft },
-                set: { liveState.draft = $0 }
-            ),
-            originalAlias: liveState.originalAlias,
+            draft: $state.draft,
+            originalAlias: state.originalAlias,
             onSaved: {
-                liveState.isReady = false
+                state.isReady = false
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             },
             onCancel: {
-                liveState.isReady = false
+                state.isReady = false
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             }
         )
-        .managesActivationPolicy(identifierPrefix: "bastion.host-editor")
     }
 }
