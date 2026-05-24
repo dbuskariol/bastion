@@ -6,6 +6,7 @@ import BastionIdentifiers
 /// Bastion's host-list use case.
 struct MenuContentView: View {
     @ObservedObject var coordinator: AppCoordinator
+    @ObservedObject var updateController: UpdateController
     @State private var expandedHostIDs: Set<UUID> = []
     @State private var editorDraft: ManagedHost?
     @State private var editorOriginalAlias: String?
@@ -183,6 +184,13 @@ struct MenuContentView: View {
         HStack(spacing: 12) {
             terminalPicker
             Spacer()
+            if updateController.isConfigured {
+                Button("Check for updates") {
+                    updateController.checkForUpdates()
+                }
+                .buttonStyle(.borderless)
+                .disabled(!updateController.canCheckForUpdates)
+            }
             Button("Refresh") {
                 Task { await coordinator.refreshNow() }
             }

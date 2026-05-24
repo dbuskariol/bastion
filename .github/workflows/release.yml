@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver version (e.g. 0.1.0 or 0.1.0-beta.1)"
+        required: true
+        type: string
+      publish:
+        description: "Publish GitHub release (false = build artefacts only)"
+        required: false
+        type: boolean
+        default: true
+
+# Maintainer-only. Secrets required:
+#   APPLE_ID
+#   APPLE_APP_SPECIFIC_PASSWORD
+#   APPLE_TEAM_ID
+#   CODESIGN_P12_BASE64                — Developer ID Application .p12 (base64)
+#   CODESIGN_P12_PASSWORD
+#   SPARKLE_PRIVATE_ED_KEY             — Sparkle EdDSA private key
+#   GH_RELEASE_TOKEN                   — repo-scoped PAT for the gh CLI
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import Developer ID certificate
+        env:
+          P12: ${{ secrets.CODESIGN_P12_BASE64 }}
+          P12_PASS: ${{ secrets.CODESIGN_P12_PASSWORD }}
+        run: |
+          set -e
+          echo "$P12" | base64 -D > /tmp/dev_id.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security import /tmp/dev_id.p12 -k build.keychain \
+            -P "$P12_PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k actions build.keychain
+          rm /tmp/dev_id.p12
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials bastion \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+      - name: Write Sparkle private key
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          mkdir -p .sparkle
+          echo "$SPARKLE_PRIVATE_ED_KEY" > .sparkle/sparkle.key
+      - name: Auth gh
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: gh auth status
+      - name: Run release
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          make release VERSION=${{ github.event.inputs.version }} \
+                      PUBLISH=${{ github.event.inputs.publish }}
