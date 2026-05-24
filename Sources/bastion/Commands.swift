@@ -309,12 +309,66 @@ private func printDoctor(_ report: StatusReport) {
     }
 }
 
-// MARK: - import (stub — full impl in commit 6)
+// MARK: - import
 
 func runImport(_ args: [String]) async throws -> Int32 {
-    fputs("Import lands in commit 6 of the rollout — not yet wired through this CLI.\n", stderr)
-    fputs("Source requested: \(args.first ?? "(none)")\n", stderr)
-    return 2
+    let flags = try CLIFlags(args)
+    guard let sourceName = flags.positional.first else {
+        throw CLIError.missingFlag("<source>")
+    }
+    guard let source = ImportSourceID(rawValue: sourceName) else {
+        let allowedSources = ImportSourceID.allCases.map(\.rawValue).joined(separator: "|")
+        throw CLIError.invalidValue(
+            flag: "<source>", value: sourceName,
+            reason: "expected one of \(allowedSources)"
+        )
+    }
+    let registry = try engine.loadRegistry()
+    let importer = ImportEngine(registry: registry)
+    let candidates = importer.discover(sources: [source])
+    if flags.bool("json") {
+        try printJSON(candidates)
+    } else {
+        if candidates.isEmpty {
+            print("No candidates found in \(source.rawValue).")
+        } else {
+            print("Found \(candidates.count) candidate(s):")
+            for c in candidates.prefix(50) {
+                let userPart = c.user.map { "\($0)@" } ?? ""
+                let portPart = c.port != 22 ? ":\(c.port)" : ""
+                let badge = c.alreadyManaged ? " (managed)" : ""
+                let sourcesStr = c.sources.map { $0.rawValue }.sorted().joined(separator: ",")
+                print("  \(c.suggestedAlias.padding(toLength: 24, withPad: " ", startingAt: 0))  \(userPart)\(c.hostname)\(portPart)  [\(sourcesStr) × \(c.invocationCount)]\(badge)")
+            }
+            if candidates.count > 50 {
+                print("  ... and \(candidates.count - 50) more (use --json for full list)")
+            }
+        }
+    }
+
+    if flags.bool("apply") {
+        let chosen = candidates.filter { !$0.alreadyManaged }
+        var applied = 0
+        var skipped = 0
+        for candidate in chosen {
+            let host = ManagedHost(
+                alias: candidate.suggestedAlias,
+                hostname: candidate.hostname,
+                user: candidate.user,
+                port: candidate.port,
+                identityFiles: candidate.identityFiles
+            )
+            do {
+                _ = try await engine.upsertHost(host, skipIntegrationPass: true)
+                applied += 1
+            } catch {
+                skipped += 1
+                FileHandle.standardError.write(Data("warn: skipped \(candidate.suggestedAlias): \(error)\n".utf8))
+            }
+        }
+        print("Applied: \(applied), skipped: \(skipped).")
+    }
+    return 0
 }
 
 // MARK: - uninstall
