@@ -8,6 +8,11 @@ struct BastionMenuBarApp: App {
     @StateObject private var updateController = UpdateController()
     @Environment(\.openWindow) private var openWindow
 
+    /// Sticky flag — once the user has gone through (or dismissed) the
+    /// onboarding window, never re-trigger it automatically. They can
+    /// re-open it manually from the popover footer if needed.
+    @AppStorage("bastion.onboarding.shown") private var onboardingHasShown: Bool = false
+
     var body: some Scene {
         MenuBarExtra {
             MenuContentView(coordinator: coordinator, updateController: updateController)
@@ -17,13 +22,14 @@ struct BastionMenuBarApp: App {
                 anyWarning: coordinator.status.iCloudSyncSuspected
                           || !coordinator.status.includeInstalled
             )
-            .background(OnboardingTrigger(coordinator: coordinator))
+            .background(OnboardingTrigger(coordinator: coordinator, hasShown: $onboardingHasShown))
         }
         .menuBarExtraStyle(.window)
 
         Window("Bastion Setup", id: "bastion.setup") {
             OnboardingWindow(coordinator: coordinator) {
-                NSApp.keyWindow?.close()
+                onboardingHasShown = true
+                ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.setup")
             }
         }
         .windowResizability(.contentSize)
@@ -33,9 +39,7 @@ struct BastionMenuBarApp: App {
         }
 
         // Separate Window scene for the host editor so it survives the
-        // popover closing on focus shift (MenuBarExtra(.window) closes
-        // the popover the moment focus moves out of it, which it does
-        // the instant a sheet tries to take input — issue #2 in user feedback).
+        // popover closing on focus shift.
         Window("Host", id: "bastion.host-editor") {
             HostEditorWindow(coordinator: coordinator)
         }
@@ -46,26 +50,35 @@ struct BastionMenuBarApp: App {
 
 /// Auto-opens the Setup window once on first launch. Hosted inside the
 /// MenuBarExtra label's `.background` so it's always in the scene graph
-/// (Vigil pattern).
+/// (Vigil pattern). Backed by `@AppStorage` because `@State` here resets
+/// every time SwiftUI recreates the trigger view (which happens whenever
+/// the menu-bar label re-renders), which was the bug source: every host
+/// add caused the wizard to re-fire.
 private struct OnboardingTrigger: View {
     @ObservedObject var coordinator: AppCoordinator
+    @Binding var hasShown: Bool
     @Environment(\.openWindow) private var openWindow
-    @State private var didTrigger = false
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .onAppear {
-                guard !didTrigger else { return }
+                guard !hasShown else { return }
                 Task {
                     // Wait briefly so the initial status refresh populates.
                     try? await Task.sleep(for: .milliseconds(800))
+                    guard !hasShown else { return }
                     let isEmpty = coordinator.engine.store.isEmpty()
                     if isEmpty {
                         await MainActor.run {
-                            didTrigger = true
+                            hasShown = true
                             openWindow(id: "bastion.setup")
                         }
+                    } else {
+                        // Hosts exist — user is past first run. Mark
+                        // onboarding as already shown so we never
+                        // auto-open it for them.
+                        await MainActor.run { hasShown = true }
                     }
                 }
             }

@@ -168,6 +168,10 @@ struct MenuContentView: View {
             }
             .buttonStyle(.borderless)
             .disabled(coordinator.isRefreshing)
+            Button("Re-run setup") {
+                openWindow(id: "bastion.setup")
+            }
+            .buttonStyle(.borderless)
             Button("Quit") { NSApp.terminate(nil) }
                 .buttonStyle(.borderless)
                 .keyboardShortcut("q")
