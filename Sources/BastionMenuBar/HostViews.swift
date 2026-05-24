@@ -195,38 +195,24 @@ struct HostDetailCard: View {
         }
     }
 
-    /// Tap-to-copy row. Shows a "Copied" overlay that fades in then out.
+    /// Tap-to-copy row. Industry-standard pattern: the trailing copy
+    /// icon (doc.on.doc) swaps to a green checkmark for ~1.2s on tap.
+    /// The value text stays put.
     @ViewBuilder
     private func copyableRow(key: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(key).font(.caption).foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
-            ZStack(alignment: .leading) {
-                Text(value)
-                    .font(.caption.monospaced())
-                    .opacity(copiedField == key ? 0.25 : 1)
-                if copiedField == key {
-                    HStack(spacing: 3) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Copied")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.green)
-                    }
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
-            }
+            Text(value).font(.caption.monospaced())
             Spacer()
-            Image(systemName: "doc.on.doc")
+            Image(systemName: copiedField == key ? "checkmark" : "doc.on.doc")
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(copiedField == key ? Color.green : Color.secondary)
+                .frame(width: 12, height: 12)
+                .animation(.easeInOut(duration: 0.15), value: copiedField == key)
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(copiedField == key ? Color.green.opacity(0.08) : Color.clear)
-        )
         .contentShape(Rectangle())
         .onTapGesture { copy(key: key, value: value) }
         .help("Click to copy")
@@ -235,14 +221,13 @@ struct HostDetailCard: View {
     private func copy(key: String, value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.easeInOut(duration: 0.15)) {
             copiedField = key
         }
-        // Reset after a short hold.
         Task {
-            try? await Task.sleep(for: .milliseconds(1100))
+            try? await Task.sleep(for: .milliseconds(1200))
             await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(.easeInOut(duration: 0.15)) {
                     if copiedField == key { copiedField = nil }
                 }
             }
