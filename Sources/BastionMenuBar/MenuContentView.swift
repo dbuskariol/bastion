@@ -103,21 +103,7 @@ struct MenuContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if coordinator.status.oneOnePasswordAgentDetected {
-                Image(systemName: "key.fill")
-                    .foregroundStyle(.orange)
-                    .help("1Password SSH agent detected — Bastion will not call ssh-add against it.")
-            }
-            if coordinator.status.iCloudSyncSuspected {
-                Image(systemName: "icloud.fill")
-                    .foregroundStyle(.orange)
-                    .help("~/.ssh appears to be synced across Macs — concurrent edits may conflict.")
-            }
-            if !coordinator.status.includeInstalled {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .help("Include block missing from ~/.ssh/config. Run `bastion config install-include`.")
-            }
+            warningButtons
             Button(action: { openEditor() }) {
                 Image(systemName: "plus.circle")
             }
@@ -125,6 +111,43 @@ struct MenuContentView: View {
             .help("Add host")
         }
         .padding(10)
+    }
+
+    @ViewBuilder
+    private var warningButtons: some View {
+        if coordinator.status.oneOnePasswordAgentDetected {
+            WarningButton(
+                icon: "key.fill",
+                color: .orange,
+                title: "1Password SSH agent detected",
+                message: "Bastion will not call ssh-add against the 1Password agent (it refuses added keys). Your existing 1Password keys still work — they're served by the agent, and ssh hosts that need them will be authenticated automatically.",
+                primary: nil
+            )
+        }
+        if coordinator.status.iCloudSyncSuspected {
+            WarningButton(
+                icon: "icloud.fill",
+                color: .orange,
+                title: "~/.ssh appears synced across Macs",
+                message: "Concurrent edits from another Mac may conflict with Bastion-managed files. Bastion only writes to ~/.ssh/config.d/bastion.conf and the single Include line in ~/.ssh/config — other config you manage by hand is untouched.",
+                primary: WarningAction(label: "Open docs") {
+                    if let url = URL(string: "https://github.com/dbuskariol/bastion#multi-mac-sync") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            )
+        }
+        if !coordinator.status.includeInstalled {
+            WarningButton(
+                icon: "exclamationmark.triangle.fill",
+                color: .orange,
+                title: "Include block missing",
+                message: "Bastion needs one `Include ~/.ssh/config.d/*.conf` line at the top of your ~/.ssh/config so other tools (scp, rsync, mosh, git, VSCode Remote-SSH) see your managed hosts. We can add it now — it's a 3-line sentinel-guarded block that's clean to uninstall.",
+                primary: WarningAction(label: "Install now") {
+                    coordinator.installSSHConfigInclude()
+                }
+            )
+        }
     }
 
     // MARK: - Empty state

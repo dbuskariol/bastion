@@ -219,6 +219,19 @@ final class AppCoordinator: ObservableObject {
         proc.arguments = ["-t", Paths.managedConfigFile.path]
         try? proc.run()
     }
+
+    /// Inject the sentinel-guarded `Include` block into ~/.ssh/config and
+    /// refresh status so the header warning chip disappears.
+    func installSSHConfigInclude() {
+        Task {
+            do {
+                _ = try engine.scanner.ensureIncludeInstalled()
+                await refreshNow()
+            } catch {
+                lastConnectError = "Couldn't install Include: \(error)"
+            }
+        }
+    }
 }
 
 // MARK: - Menu-bar-only preferences store
