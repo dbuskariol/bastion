@@ -9,18 +9,30 @@ struct BastionMenuBarApp: App {
     @Environment(\.openWindow) private var openWindow
 
     /// Sticky flag — once the user has gone through (or dismissed) the
-    /// onboarding window, never re-trigger it automatically. They can
-    /// re-open it manually from the popover footer if needed.
+    /// onboarding window, never re-trigger it automatically.
     @AppStorage("bastion.onboarding.shown") private var onboardingHasShown: Bool = false
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContentView(coordinator: coordinator, updateController: updateController)
+            // Inject the coordinator + update controller via environment
+            // so MenuContentView (hosted inside MenuBarExtra(.window)'s
+            // private NSPanel) re-subscribes at view-tree insertion time
+            // — rather than relying on a constructor-captured
+            // @ObservedObject wrapper that the panel latches on first
+            // open and never re-arms when the App scene re-evaluates.
+            // Diagnosed via dual-model consensus.
+            MenuContentView()
+                .environmentObject(coordinator)
+                .environmentObject(updateController)
         } label: {
+            // Read only the derived `menuBarBadge` here — NEVER
+            // `coordinator.status` directly. Otherwise the App scene
+            // re-renders on every refresh and the MenuBarExtra
+            // popover's hosting view never re-arms its content
+            // observation.
             MenuBarLabel(
-                anyMasterAlive: coordinator.status.hosts.contains { $0.controlMaster.status == .running },
-                anyWarning: coordinator.status.iCloudSyncSuspected
-                          || !coordinator.status.includeInstalled
+                anyMasterAlive: coordinator.menuBarBadge.anyMasterAlive,
+                anyWarning: coordinator.menuBarBadge.anyWarning
             )
             .background(OnboardingTrigger(coordinator: coordinator, hasShown: $onboardingHasShown))
         }
@@ -31,6 +43,7 @@ struct BastionMenuBarApp: App {
                 onboardingHasShown = true
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.setup")
             }
+            .environmentObject(coordinator)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -38,10 +51,9 @@ struct BastionMenuBarApp: App {
             CommandGroup(replacing: .newItem) {}
         }
 
-        // Separate Window scene for the host editor so it survives the
-        // popover closing on focus shift.
         Window("Host", id: "bastion.host-editor") {
-            HostEditorWindow(coordinator: coordinator)
+            HostEditorWindow()
+                .environmentObject(coordinator)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
