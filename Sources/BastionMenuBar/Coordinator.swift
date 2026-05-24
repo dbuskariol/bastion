@@ -4,6 +4,17 @@ import Combine
 import BastionCore
 import BastionIdentifiers
 
+/// Shared state for the host editor window. Owned by AppCoordinator
+/// so opening the editor from anywhere (popover '+' button, host
+/// context menu, expanded-card Edit) hands the draft into a single
+/// Window scene that survives popover dismissal.
+@MainActor
+final class HostEditorState: ObservableObject {
+    @Published var draft: ManagedHost = ManagedHost(alias: "new-host", hostname: "")
+    @Published var originalAlias: String? = nil
+    @Published var isReady: Bool = false
+}
+
 /// Single source-of-truth observable state for the menu app. Polls
 /// `bastion status --json` via in-process ConnectionEngine; rolls up
 /// selective polling cadences per the rubber-duck pass.
@@ -20,6 +31,7 @@ final class AppCoordinator: ObservableObject {
     let detector: TerminalDetector
     let factory = TerminalLauncherFactory()
     let preferences = MenuBarPreferences()
+    let editorState = HostEditorState()
 
     private var refreshTask: Task<Void, Never>?
     private var popoverIsOpen: Bool = false
@@ -126,6 +138,23 @@ final class AppCoordinator: ObservableObject {
     }()
 
     // MARK: - Actions
+
+    func openHostEditor(for alias: String? = nil) {
+        if let alias {
+            let registry = (try? engine.loadRegistry()) ?? HostRegistry()
+            if let existing = registry.host(named: alias) {
+                editorState.draft = existing
+                editorState.originalAlias = existing.alias
+            } else {
+                editorState.draft = ManagedHost(alias: "new-host", hostname: "")
+                editorState.originalAlias = nil
+            }
+        } else {
+            editorState.draft = ManagedHost(alias: "new-host", hostname: "")
+            editorState.originalAlias = nil
+        }
+        editorState.isReady = true
+    }
 
     func setDefaultTerminal(_ id: TerminalID) {
         preferences.defaultTerminal = id

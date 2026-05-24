@@ -192,11 +192,46 @@ struct BasicTab: View {
                 Button("Add") {
                     let trimmed = newIdentityPath.trimmingCharacters(in: .whitespaces)
                     guard !trimmed.isEmpty else { return }
-                    draft.identityFiles.append(trimmed)
+                    if !draft.identityFiles.contains(trimmed) {
+                        draft.identityFiles.append(trimmed)
+                    }
                     newIdentityPath = ""
                 }
                 .disabled(newIdentityPath.trimmingCharacters(in: .whitespaces).isEmpty)
+                if !discoveredKeys.isEmpty {
+                    Menu {
+                        ForEach(discoveredKeys) { candidate in
+                            Button(action: { addKey(candidate.path) }) {
+                                HStack {
+                                    Text(candidate.basename)
+                                    if candidate.hasCertificate {
+                                        Image(systemName: "rosette")
+                                    } else if candidate.hasPublicKey {
+                                        Image(systemName: "key.fill")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Pick from ~/.ssh/")
+                }
             }
+        }
+    }
+
+    private var discoveredKeys: [SSHKeyDiscovery.Candidate] {
+        SSHKeyDiscovery().discover().filter { candidate in
+            !draft.identityFiles.contains(candidate.path)
+        }
+    }
+
+    private func addKey(_ path: String) {
+        if !draft.identityFiles.contains(path) {
+            draft.identityFiles.append(path)
         }
     }
 

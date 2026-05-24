@@ -29,8 +29,9 @@ public struct ImportEngine: Sendable {
     /// (it holds a FileManager reference which isn't Sendable in stdlib).
     private var scanner: UserSSHConfigScanner { UserSSHConfigScanner() }
 
-    /// Returns deduped, aggregated candidates from the requested sources.
-    public func discover(sources: [ImportSourceID]) -> [ImportCandidate] {
+    /// Returns deduped, aggregated candidates from the requested sources
+    /// pre-sorted per `sortMode`. Default is `.recent`.
+    public func discover(sources: [ImportSourceID], sortMode: ImportSortMode = .recent) -> [ImportCandidate] {
         var aggregated: [ParsedConnection.DedupKey: ImportCandidate] = [:]
 
         let expanded = sources.contains(.all)
@@ -110,15 +111,28 @@ public struct ImportEngine: Sendable {
             c.alreadyManaged = registryKeys.contains(candidate.id)
             return c
         }.sorted { lhs, rhs in
-            // Most-recently-seen first; ties broken by invocation count
-            // descending then alias asc.
-            let lhsKey = lhs.lastSeen ?? Date.distantPast
-            let rhsKey = rhs.lastSeen ?? Date.distantPast
-            if lhsKey != rhsKey { return lhsKey > rhsKey }
-            if lhs.invocationCount != rhs.invocationCount {
-                return lhs.invocationCount > rhs.invocationCount
+            switch sortMode {
+            case .recent:
+                // Most recent first; ties → most-used first → alias asc.
+                let lk = lhs.lastSeen ?? .distantPast
+                let rk = rhs.lastSeen ?? .distantPast
+                if lk != rk { return lk > rk }
+                if lhs.invocationCount != rhs.invocationCount {
+                    return lhs.invocationCount > rhs.invocationCount
+                }
+                return lhs.suggestedAlias.lowercased() < rhs.suggestedAlias.lowercased()
+            case .mostUsed:
+                // Most-used first; ties → most-recent first → alias asc.
+                if lhs.invocationCount != rhs.invocationCount {
+                    return lhs.invocationCount > rhs.invocationCount
+                }
+                let lk = lhs.lastSeen ?? .distantPast
+                let rk = rhs.lastSeen ?? .distantPast
+                if lk != rk { return lk > rk }
+                return lhs.suggestedAlias.lowercased() < rhs.suggestedAlias.lowercased()
+            case .alphabetical:
+                return lhs.suggestedAlias.lowercased() < rhs.suggestedAlias.lowercased()
             }
-            return lhs.suggestedAlias < rhs.suggestedAlias
         }
     }
 
