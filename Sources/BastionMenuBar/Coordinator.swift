@@ -184,25 +184,136 @@ final class AppCoordinator: ObservableObject {
         self.defaultTerminal = id
     }
 
+    /// Per-host auth state for interactive (FIDO/SSO) bootstrap UX.
+    /// `notRequired` for plain key-auth hosts.
+    enum InteractiveAuthState: Equatable {
+        case notRequired                        // not a FIDO host
+        case authenticating(since: Date)        // user is doing the FIDO dance
+        case ready                              // master alive, ready to multiplex
+        case failed(String)                     // timeout or error
+    }
+
+    @Published var interactiveAuthStates: [String: InteractiveAuthState] = [:]
+
     func connect(_ alias: String, newWindow: Bool = false) {
         Task {
-            do {
-                guard let terminalID = defaultTerminal else {
-                    lastConnectError = "No default terminal set. Open Preferences to pick one."
+            guard let terminalID = defaultTerminal else {
+                lastConnectError = "No default terminal set. Open Preferences to pick one."
+                return
+            }
+            let launcher = factory.launcher(for: terminalID)
+            let env = engine.pathResolver.environment()
+
+            // Fast path: master alive → multiplex straight into a shell.
+            // This is the "every connect after the first" UX — instant.
+            let state = (try? await engine.checkMaster(alias))
+                        ?? ControlMasterState(status: .unknown)
+            if state.status == .running {
+                launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+                return
+            }
+
+            // Resolve the managed host to decide bootstrap strategy.
+            let host = (try? engine.loadRegistry())?.host(named: alias)
+
+            // FIDO / interactive-auth path: open a foreground `ssh -fNM`
+            // tab so the user can complete the auth dance in their
+            // terminal. Then poll for the master coming up and
+            // auto-open the shell tab. Per dual-model consensus we
+            // never automate the auth touch or the Enter keystroke.
+            if host?.requiresInteractiveAuth == true {
+                interactiveAuthStates[alias] = .authenticating(since: Date())
+                launch(
+                    launcher: launcher,
+                    argv: ["ssh", "-fNM",
+                           "-o", "ServerAliveInterval=60",
+                           "-o", "ServerAliveCountMax=3",
+                           alias],
+                    newWindow: false,
+                    env: env
+                )
+                let alive = await engine.awaitMaster(alias, timeout: 180)
+                if alive {
+                    interactiveAuthStates[alias] = .ready
+                    await NotificationDispatcher.shared.post(
+                        category: .masterDropped,  // reuse opt-in category
+                        host: alias,
+                        body: "Authentication complete. Opening shell…"
+                    )
+                    launch(launcher: launcher, argv: ["ssh", alias], newWindow: true, env: env)
+                    await refreshNow()
+                } else {
+                    interactiveAuthStates[alias] = .failed("Authentication didn't complete in 3 minutes.")
+                    await NotificationDispatcher.shared.post(
+                        category: .masterDropped,
+                        host: alias,
+                        body: "Authentication timed out. Click Connect to retry."
+                    )
+                }
+                return
+            }
+
+            // Default (non-interactive) path: optimistic BatchMode
+            // bootstrap; on failure, open the user's terminal with `ssh
+            // <alias>` so they can handle any prompts visibly.
+            if state.enabled {
+                if let bgResult = try? await engine.establishBackgroundMaster(alias),
+                   bgResult.exitCode == 0 {
+                    // Master came up silently — fast-launch the shell.
+                    launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+                    await refreshNow()
                     return
                 }
-                let launcher = factory.launcher(for: terminalID)
-                try launcher.launch(
-                    argv: ["ssh", alias],
-                    newWindow: newWindow,
-                    environment: engine.pathResolver.environment()
-                )
-                lastConnectError = nil
-            } catch let error as TerminalLaunchError {
-                lastConnectError = error.description
-            } catch {
-                lastConnectError = error.localizedDescription
             }
+            // Final fallback: just open the terminal with `ssh <alias>`.
+            launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+        }
+    }
+
+    /// "Unlock for the day" — pre-warm the ControlMaster without
+    /// auto-opening a shell. The user clicks this once in the morning;
+    /// every subsequent Connect is instant for the rest of the
+    /// ControlPersist window.
+    func unlockMaster(_ alias: String) {
+        Task {
+            guard let terminalID = defaultTerminal else {
+                lastConnectError = "No default terminal set."
+                return
+            }
+            let launcher = factory.launcher(for: terminalID)
+            let env = engine.pathResolver.environment()
+            interactiveAuthStates[alias] = .authenticating(since: Date())
+            launch(
+                launcher: launcher,
+                argv: ["ssh", "-fNM",
+                       "-o", "ServerAliveInterval=60",
+                       "-o", "ServerAliveCountMax=3",
+                       alias],
+                newWindow: false,
+                env: env
+            )
+            let alive = await engine.awaitMaster(alias, timeout: 180)
+            if alive {
+                interactiveAuthStates[alias] = .ready
+                await NotificationDispatcher.shared.post(
+                    category: .masterDropped, host: alias,
+                    body: "Authenticated. Connects will be instant for the next ~8h."
+                )
+                await refreshNow()
+            } else {
+                interactiveAuthStates[alias] = .failed("Auth didn't complete in 3 minutes.")
+            }
+        }
+    }
+
+    private func launch(launcher: TerminalLauncher, argv: [String], newWindow: Bool, env: [String: String]) {
+        do {
+            try launcher.launch(argv: argv, newWindow: newWindow, environment: env)
+            lastConnectError = nil
+        } catch let error as TerminalLaunchError {
+            lastConnectError = error.description
+        } catch {
+            lastConnectError = error.localizedDescription
         }
     }
 

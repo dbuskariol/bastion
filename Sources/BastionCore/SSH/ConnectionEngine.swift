@@ -225,6 +225,26 @@ public final class ConnectionEngine: @unchecked Sendable {
         )
     }
 
+    /// Poll `ssh -O check` until the master comes up or the deadline
+    /// passes. Used by the connect-with-bootstrap flow to detect when
+    /// the user has completed the FIDO/SSO dance in their terminal.
+    /// Returns true if alive, false on timeout. Cadence is cheap (local
+    /// AF_UNIX socket connect).
+    public func awaitMaster(
+        _ alias: String,
+        timeout: TimeInterval = 180,
+        pollInterval: TimeInterval = 1
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let state = try? await checkMaster(alias), state.status == .running {
+                return true
+            }
+            try? await Task.sleep(for: .seconds(pollInterval))
+        }
+        return false
+    }
+
     /// `ssh -o BatchMode=yes -o ConnectTimeout=5 <alias> true`. Used by
     /// the "Test connection" UI affordance; opt-in default-off per
     /// consensus (may show in remote auth logs).

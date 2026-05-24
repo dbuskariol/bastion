@@ -81,6 +81,15 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
     public var createdAt: Date
     public var updatedAt: Date
 
+    /// True for hosts whose server demands an interactive FIDO/WebAuthn
+    /// challenge that `BatchMode=yes` cannot satisfy (e.g. GitHub's
+    /// `vault`). When set, `Connect` runs `ssh -fNM <alias>` in
+    /// the user's terminal so they can complete the browser+touch
+    /// dance ONCE, then polls `ssh -O check` and auto-opens a shell tab
+    /// when the master comes up. Subsequent connects in the same
+    /// ControlPersist window are instant.
+    public var requiresInteractiveAuth: Bool
+
     public init(
         id: UUID = UUID(),
         alias: String,
@@ -95,7 +104,8 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         tags: [String] = [],
         notes: String = "",
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        requiresInteractiveAuth: Bool = false
     ) {
         self.id = id
         self.alias = alias
@@ -111,6 +121,34 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         self.notes = notes
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.requiresInteractiveAuth = requiresInteractiveAuth
+    }
+
+    // Custom decoder so adding `requiresInteractiveAuth` doesn't break
+    // hosts.json files written before the field existed (default = false).
+    private enum CodingKeys: String, CodingKey {
+        case id, alias, hostname, user, port, identityFiles
+        case controlMaster, controlPersist, advanced, rawConfigOverride
+        case tags, notes, createdAt, updatedAt, requiresInteractiveAuth
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.alias = try c.decode(String.self, forKey: .alias)
+        self.hostname = try c.decode(String.self, forKey: .hostname)
+        self.user = try c.decodeIfPresent(String.self, forKey: .user)
+        self.port = try c.decode(Int.self, forKey: .port)
+        self.identityFiles = try c.decode([String].self, forKey: .identityFiles)
+        self.controlMaster = try c.decode(ControlMasterChoice.self, forKey: .controlMaster)
+        self.controlPersist = try c.decode(ControlPersistChoice.self, forKey: .controlPersist)
+        self.advanced = try c.decode([SSHOption: String].self, forKey: .advanced)
+        self.rawConfigOverride = try c.decodeIfPresent(String.self, forKey: .rawConfigOverride)
+        self.tags = try c.decode([String].self, forKey: .tags)
+        self.notes = try c.decode(String.self, forKey: .notes)
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        self.requiresInteractiveAuth = try c.decodeIfPresent(Bool.self, forKey: .requiresInteractiveAuth) ?? false
     }
 }
 
