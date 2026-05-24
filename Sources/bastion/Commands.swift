@@ -206,24 +206,30 @@ func runTerminal(_ args: [String]) async throws -> Int32 {
     guard let sub = flags.positional.first else {
         throw CLIError.missingFlag("<list|set>")
     }
+    let pathResolver = engine.pathResolver
+    let detector = TerminalDetector(whichResolver: WhichResolver(pathResolver: pathResolver))
     switch sub {
     case "list":
-        // Full TerminalDetector lands in commit 7; commit 5 prints the
-        // canonical list with installation status.
-        let detector = StubTerminalDetector()
-        let snapshots = TerminalID.allCases.map { detector.snapshot(for: $0) }
+        let snapshots = detector.snapshots()
         if flags.bool("json") { try printJSON(snapshots); return 0 }
+        let defaultPick = PreferencesStore.shared.defaultTerminal()
         for s in snapshots {
             let mark = s.installed ? "✓" : "·"
-            print("\(mark) \(s.id.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))  \(s.id.displayName)\(s.appPath.map { "  (\($0))" } ?? "")")
+            let star = (s.id == defaultPick) ? " ★" : ""
+            let path = s.appPath ?? s.cliPath
+            print("\(mark) \(s.id.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))  \(s.id.displayName)\(path.map { "  (\($0))" } ?? "")\(star)")
+        }
+        if let suggested = detector.suggestedDefault() {
+            print("\nSuggested default: \(suggested.displayName) (\(suggested.rawValue))")
         }
         return 0
     case "set":
         guard flags.positional.count >= 2 else { throw CLIError.missingFlag("<id>") }
         let raw = flags.positional[1]
         guard let id = TerminalID(rawValue: raw) else {
+            let validIDs = TerminalID.allCases.map { $0.rawValue }.joined(separator: ",")
             throw CLIError.invalidValue(flag: "<id>", value: raw,
-                                        reason: "must be one of \(TerminalID.allCases.map { $0.rawValue }.joined(separator: ","))")
+                                        reason: "must be one of \(validIDs)")
         }
         try PreferencesStore.shared.setDefaultTerminal(id)
         print("Default terminal set to \(id.displayName).")
@@ -405,15 +411,7 @@ func runUninstall(_ args: [String]) async throws -> Int32 {
 
 // MARK: - Stubs for components that land in later commits
 
-/// Minimal terminal-detection stub. Commit 7 replaces with a full
-/// LSCopyApplicationURLsForBundleIdentifier-based detector.
-struct StubTerminalDetector {
-    func snapshot(for id: TerminalID) -> TerminalSnapshot {
-        let appPath = "/Applications/\(id.displayName).app"
-        let installed = FileManager.default.fileExists(atPath: appPath)
-        return TerminalSnapshot(id: id, installed: installed, appPath: installed ? appPath : nil)
-    }
-}
+// (TerminalDetector replaced the stub in commit 7; the stub is gone.)
 
 /// Lazy stand-in for the per-process preferences file. Replaced fully in
 /// commit 8 with the SwiftUI menu app's preferences plumbing; CLI just
