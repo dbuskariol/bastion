@@ -116,6 +116,35 @@ public struct SSHGReader {
         return Self.parse(stdout: result.stdout)
     }
 
+    /// Like `effectiveConfig` but with a hard wall-clock timeout that
+    /// actually kills the spawned `ssh -G` process. Needed because
+    /// `CanonicalizeHostname yes` + `Match exec` directives can cause
+    /// `ssh -G` to do DNS lookups and run shell commands — turning a
+    /// nominal 5-20ms config parse into a multi-second hang on flaky
+    /// VPN / slow DNS. Rubber-duck pass: pre-flight in the connect path
+    /// can't tolerate that, so the editor and connect callers route
+    /// through this variant.
+    ///
+    /// Returns nil on timeout (caller treats as "couldn't probe" and
+    /// falls back to best-effort behaviour). Throws on actual ssh -G
+    /// errors (e.g. malformed alias).
+    public func effectiveConfigWithTimeout(
+        forAlias alias: String,
+        timeout: TimeInterval = 0.5
+    ) async -> EffectiveConfig? {
+        var args = ["-G"]
+        args.append(alias)
+        let result = await ProcessTimeout.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ssh"),
+            arguments: args,
+            environment: environment.isEmpty ? nil : environment,
+            timeout: timeout
+        )
+        if result.timedOut { return nil }
+        guard let exit = result.exitCode, exit == 0 else { return nil }
+        return Self.parse(stdout: result.stdout)
+    }
+
     /// Parse the `key value\n` lines `ssh -G` emits. The parser is
     /// strictly line-oriented (rubber-duck S2): values may legitimately
     /// contain spaces (paths like `/Users/Some User/.ssh/id_ed25519`).

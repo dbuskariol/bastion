@@ -212,7 +212,7 @@ final class AppCoordinator: ObservableObject {
     @discardableResult
     func applyImportCandidates(
         _ candidates: [ImportCandidate],
-        controlMaster: ControlMasterChoice = .inherit,
+        controlMaster: ControlMasterChoice = .on,
         controlPersist: ControlPersistChoice = .inherit
     ) async -> (applied: Int, skipped: Int) {
         var applied = 0
@@ -309,105 +309,91 @@ final class AppCoordinator: ObservableObject {
     @Published var interactiveAuthStates: [String: InteractiveAuthState] = [:]
 
     func connect(_ alias: String, newWindow: Bool = false) {
-        // Optimistic UI: if the host needs interactive auth, flip the
-        // chip to `.authenticating` synchronously so the user sees
-        // immediate feedback. (Without this, the chip didn't change
-        // until after the multi-hundred-ms `ssh -O check` returned.)
-        if let host = (try? engine.loadRegistry())?.host(named: alias),
-           host.requiresInteractiveAuth {
-            interactiveAuthStates[alias] = .authenticating(since: Date())
-        }
         Task {
-            guard let terminalID = defaultTerminal else {
-                lastError = "No default terminal set. Open Preferences to pick one."
-                interactiveAuthStates.removeValue(forKey: alias)
-                return
-            }
-            let launcher = factory.launcher(for: terminalID)
-            let env = engine.pathResolver.environment()
-
-            // Fast path: master alive → multiplex straight into a shell.
-            // This is the "every connect after the first" UX — instant.
-            let state = (try? await engine.checkMaster(alias))
-                        ?? ControlMasterState(status: .unknown)
-            if state.status == .running {
-                interactiveAuthStates[alias] = .ready
-                launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
-                return
-            }
-
-            // Resolve the managed host to decide bootstrap strategy.
-            let host = (try? engine.loadRegistry())?.host(named: alias)
-
-            // FIDO / interactive-auth path: open a foreground `ssh -fNM`
-            // tab so the user can complete the auth dance in their
-            // terminal. Then poll for the master coming up and
-            // auto-open the shell tab. Per dual-model consensus we
-            // never automate the auth touch or the Enter keystroke.
-            if host?.requiresInteractiveAuth == true {
-                // (Already set to .authenticating above for instant UI.)
-                launch(
-                    launcher: launcher,
-                    argv: ["ssh", "-fNM",
-                           "-o", "ServerAliveInterval=60",
-                           "-o", "ServerAliveCountMax=3",
-                           alias],
-                    newWindow: false,
-                    env: env
-                )
-                let alive = await engine.awaitMaster(alias, timeout: 180)
-                if alive {
-                    interactiveAuthStates[alias] = .ready
-                    await NotificationDispatcher.shared.post(
-                        category: .masterDropped,  // reuse opt-in category
-                        host: alias,
-                        body: "Authentication complete. Opening shell…"
-                    )
-                    launch(launcher: launcher, argv: ["ssh", alias], newWindow: true, env: env)
-                    await refreshNow()
-                } else {
-                    interactiveAuthStates[alias] = .failed("Authentication didn't complete in 3 minutes.")
-                    await NotificationDispatcher.shared.post(
-                        category: .masterDropped,
-                        host: alias,
-                        body: "Authentication timed out. Click Connect to retry."
-                    )
-                }
-                return
-            }
-
-            // Default (non-interactive) path: optimistic BatchMode
-            // bootstrap; on failure, open the user's terminal with `ssh
-            // <alias>` so they can handle any prompts visibly.
-            if state.enabled {
-                if let bgResult = try? await engine.establishBackgroundMaster(alias),
-                   bgResult.exitCode == 0 {
-                    // Master came up silently — fast-launch the shell.
-                    launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
-                    await refreshNow()
-                    return
-                }
-            }
-            // Final fallback: just open the terminal with `ssh <alias>`.
-            launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+            await connectImpl(alias, newWindow: newWindow)
         }
     }
 
-    /// "Unlock for the day" — pre-warm the ControlMaster without
-    /// auto-opening a shell. The user clicks this once in the morning;
-    /// every subsequent Connect is instant for the rest of the
-    /// ControlPersist window.
-    func unlockMaster(_ alias: String) {
-        // Optimistic synchronous flip so the chip changes immediately.
-        interactiveAuthStates[alias] = .authenticating(since: Date())
-        Task {
-            guard let terminalID = defaultTerminal else {
-                lastError = "No default terminal set."
-                interactiveAuthStates.removeValue(forKey: alias)
+    private func connectImpl(_ alias: String, newWindow: Bool) async {
+        // Re-entrancy guard: if a previous connect is mid-flight for
+        // this alias (chip is .authenticating and the FIDO touch hasn't
+        // hit the 180s timeout yet), no-op. Prevents the two-orphaned-
+        // PIDs bug visible in the user's debug output.
+        if case .authenticating(let since) = interactiveAuthStates[alias],
+           Date().timeIntervalSince(since) < 180 {
+            return
+        }
+
+        guard let terminalID = defaultTerminal else {
+            lastError = "No default terminal set. Open Preferences to pick one."
+            return
+        }
+        let launcher = factory.launcher(for: terminalID)
+        let env = engine.pathResolver.environment()
+
+        let host = (try? engine.loadRegistry())?.host(named: alias)
+
+        // Pre-flight: resolve effective config with a 500ms timeout (so
+        // CanonicalizeHostname/Match-exec hangs can't lock the UI).
+        // This MUST come before the optimistic chip flip so we never
+        // briefly lie about state. The probe is local-only on a sane
+        // config — well under the 100ms human-perception threshold.
+        let preflight: EffectiveConfig? = await engine.reader
+            .effectiveConfigWithTimeout(forAlias: alias, timeout: 0.5)
+
+        if host?.requiresInteractiveAuth == true {
+            // FIDO host MUST have a master configured. The model-layer
+            // validator catches this at save time, but a pre-existing
+            // host with .inherit may have slipped through; we double-
+            // check at connect time.
+            if let pf = preflight,
+               !(pf.controlMasterEnabled && pf.usableControlPath != nil) {
+                interactiveAuthStates[alias] = .failed(
+                    "ControlMaster not configured for this FIDO host — open the editor and switch ControlMaster to On."
+                )
+                lastError = "FIDO host \(alias) needs ControlMaster=On. Open the editor."
                 return
             }
-            let launcher = factory.launcher(for: terminalID)
-            let env = engine.pathResolver.environment()
+        }
+
+        // Fast path 1: master already alive → multiplex into a shell.
+        let state = (try? await engine.checkMaster(alias))
+                    ?? ControlMasterState(status: .unknown)
+        if state.status == .running {
+            if host?.requiresInteractiveAuth == true {
+                interactiveAuthStates[alias] = .ready
+            }
+            launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+            return
+        }
+
+        // Fast path 2: try BatchMode bootstrap. If cached creds in agent
+        // (1Password, ssh-agent, passkey) work, we authenticate silently
+        // and skip the FIDO touch entirely — matching `gh auth login`'s
+        // "try cached cred first" UX. Hard 2s timeout with subprocess
+        // kill protects against TCP slowness.
+        //
+        // For FIDO hosts: flip optimistic .authenticating only AFTER
+        // the BatchMode attempt — otherwise the chip flickers even when
+        // the silent path succeeds.
+        if state.enabled {
+            if let bg = await engine.establishBackgroundMasterWithTimeout(alias, timeout: 2.0),
+               bg.exitCode == 0 {
+                // Background master came up. Mark ready (if FIDO) and shell in.
+                if host?.requiresInteractiveAuth == true {
+                    interactiveAuthStates[alias] = .ready
+                }
+                launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+                await refreshNow()
+                return
+            }
+        }
+
+        // Bootstrap fallback paths.
+        if host?.requiresInteractiveAuth == true {
+            // FIDO bootstrap: launch foreground `ssh -fNM` for the
+            // FIDO touch, then poll for the master.
+            interactiveAuthStates[alias] = .authenticating(since: Date())
             launch(
                 launcher: launcher,
                 argv: ["ssh", "-fNM",
@@ -417,17 +403,117 @@ final class AppCoordinator: ObservableObject {
                 newWindow: false,
                 env: env
             )
-            let alive = await engine.awaitMaster(alias, timeout: 180)
-            if alive {
+            let outcome = await engine.awaitMaster(alias, timeout: 180)
+            switch outcome {
+            case .alive:
                 interactiveAuthStates[alias] = .ready
                 await NotificationDispatcher.shared.post(
-                    category: .masterDropped, host: alias,
-                    body: "Authenticated. Connects will be instant for the next ~8h."
+                    category: .masterDropped,
+                    host: alias,
+                    body: "Authentication complete. Opening shell…"
                 )
+                launch(launcher: launcher, argv: ["ssh", alias], newWindow: true, env: env)
                 await refreshNow()
-            } else {
-                interactiveAuthStates[alias] = .failed("Auth didn't complete in 3 minutes.")
+            case .timeout:
+                interactiveAuthStates[alias] = .failed("Authentication didn't complete in 3 minutes.")
+                await NotificationDispatcher.shared.post(
+                    category: .masterDropped,
+                    host: alias,
+                    body: "Authentication timed out. Click Connect to retry."
+                )
+            case .staleAfterHeal(let socket):
+                interactiveAuthStates[alias] = .failed("Stale socket at \(socket) couldn't be cleared automatically. Try `ssh -O exit \(alias)` or remove the socket file manually.")
+            case .preflightFailed(let reason):
+                interactiveAuthStates[alias] = .failed("Master configuration broken: \(reason). Open the editor.")
             }
+            return
+        }
+
+        // Non-FIDO fallback: open the terminal so the user can handle
+        // any prompts visibly (password, passphrase, host-key trust).
+        launch(launcher: launcher, argv: ["ssh", alias], newWindow: newWindow, env: env)
+    }
+
+    /// "Unlock for the day" — pre-warm the ControlMaster without
+    /// auto-opening a shell. The user clicks this once in the morning;
+    /// every subsequent Connect is instant for the rest of the
+    /// ControlPersist window.
+    func unlockMaster(_ alias: String) {
+        // Re-entrancy guard: same logic as connect.
+        if case .authenticating(let since) = interactiveAuthStates[alias],
+           Date().timeIntervalSince(since) < 180 {
+            return
+        }
+        // Optimistic flip — by the time we get here we've decided to do
+        // real work (no fast paths to short-circuit through).
+        interactiveAuthStates[alias] = .authenticating(since: Date())
+        Task {
+            await unlockMasterImpl(alias)
+        }
+    }
+
+    private func unlockMasterImpl(_ alias: String) async {
+        guard let terminalID = defaultTerminal else {
+            lastError = "No default terminal set."
+            interactiveAuthStates.removeValue(forKey: alias)
+            return
+        }
+        let launcher = factory.launcher(for: terminalID)
+        let env = engine.pathResolver.environment()
+
+        // Try BatchMode fast-path first (cached creds via agent or
+        // passkey). Skip foreground launch if it succeeds.
+        if let bg = await engine.establishBackgroundMasterWithTimeout(alias, timeout: 2.0),
+           bg.exitCode == 0 {
+            interactiveAuthStates[alias] = .ready
+            let host = (try? engine.loadRegistry())?.host(named: alias)
+            let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
+            await NotificationDispatcher.shared.post(
+                category: .masterDropped, host: alias,
+                body: "Authenticated. Connects will be instant for \(persistLabel)."
+            )
+            await refreshNow()
+            return
+        }
+
+        launch(
+            launcher: launcher,
+            argv: ["ssh", "-fNM",
+                   "-o", "ServerAliveInterval=60",
+                   "-o", "ServerAliveCountMax=3",
+                   alias],
+            newWindow: false,
+            env: env
+        )
+        let outcome = await engine.awaitMaster(alias, timeout: 180)
+        switch outcome {
+        case .alive:
+            interactiveAuthStates[alias] = .ready
+            let host = (try? engine.loadRegistry())?.host(named: alias)
+            let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
+            await NotificationDispatcher.shared.post(
+                category: .masterDropped, host: alias,
+                body: "Authenticated. Connects will be instant for \(persistLabel)."
+            )
+            await refreshNow()
+        case .timeout:
+            interactiveAuthStates[alias] = .failed("Auth didn't complete in 3 minutes.")
+        case .staleAfterHeal(let socket):
+            interactiveAuthStates[alias] = .failed("Stale socket at \(socket) couldn't be cleared automatically.")
+        case .preflightFailed(let reason):
+            interactiveAuthStates[alias] = .failed("Master not configured: \(reason).")
+        }
+    }
+
+    /// Human-readable rendering of `ControlPersistChoice` for chips and
+    /// notification bodies. Replaces the previous hardcoded "~8h".
+    private static func formatPersist(_ choice: ControlPersistChoice) -> String {
+        switch choice {
+        case .inherit:        return "the persist window"
+        case .minutes(let m): return "\(m) minute\(m == 1 ? "" : "s")"
+        case .hours(let h):   return "\(h) hour\(h == 1 ? "" : "s")"
+        case .indefinite:     return "the session"
+        case .disabled:       return "this connection only"
         }
     }
 

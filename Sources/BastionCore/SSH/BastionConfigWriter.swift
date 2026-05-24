@@ -69,7 +69,17 @@ public struct BastionConfigWriter {
             // can override via Raw if they really need a custom path.
             lines.append("    \(SSHOption.controlPath.configKey) ~/.ssh/sockets/%C")
         }
-        if let value = host.controlPersist.configValue {
+        // ControlPersist: if user picked Inherit but ControlMaster is .on,
+        // upgrade silently to the default (.hours(8)). An On-master with
+        // no persist is just an in-session master that dies with the
+        // shell — which defeats the entire "unlock for the day" UX.
+        let effectivePersist: ControlPersistChoice = {
+            if case .inherit = host.controlPersist, host.controlMaster == .on {
+                return .defaultChoice
+            }
+            return host.controlPersist
+        }()
+        if let value = effectivePersist.configValue {
             lines.append("    \(SSHOption.controlPersist.configKey) \(value)")
         }
 
@@ -167,6 +177,19 @@ public struct BastionConfigWriter {
                     option: "rawConfigOverride",
                     reason: "must not contain Match block"
                 )
+            }
+            // ControlMaster / ControlPath / ControlPersist must NOT be
+            // expressed via raw — OpenSSH is first-match-wins, and
+            // because our writer emits its own lines first, a raw value
+            // here is silently a no-op (UX trap). Tell the user to use
+            // the Basic-tab picker instead.
+            for forbidden in ["controlmaster ", "controlpath ", "controlpersist "] {
+                if trimmed.hasPrefix(forbidden) || trimmed == String(forbidden.dropLast()) {
+                    throw SSHConfigError.invalidValue(
+                        option: "rawConfigOverride",
+                        reason: "set ControlMaster / ControlPath / ControlPersist via the Basic tab — Bastion owns these to manage the master lifecycle"
+                    )
+                }
             }
         }
     }
