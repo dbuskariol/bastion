@@ -1,39 +1,74 @@
 import SwiftUI
-import BastionIdentifiers
 import BastionCore
-
-// Bastion menu-bar app — entrypoint.
-//
-// Commit 1 ships a placeholder MenuBarExtra with the app icon and a
-// version label so we can verify the .app bundle launches and the icon
-// appears in the menu bar. Real UI (host list, editor, onboarding,
-// diagnostics) lands in commits 8+.
+import BastionIdentifiers
 
 @main
 struct BastionMenuBarApp: App {
+    @StateObject private var coordinator = AppCoordinator()
+
     var body: some Scene {
         MenuBarExtra {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Bastion")
-                    .font(.headline)
-                Text("Scaffold build · v\(BastionVersion.value)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Divider()
-                Text("Full UI lands in commits 8+ of the rollout.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Quit") {
-                    NSApp.terminate(nil)
-                }
-                .keyboardShortcut("q")
-            }
-            .padding(12)
-            .frame(width: 280)
+            MenuContentView(coordinator: coordinator)
         } label: {
-            Image(systemName: "key.horizontal.fill")
+            MenuBarLabel(
+                anyMasterAlive: coordinator.status.hosts.contains { $0.controlMaster.status == .running },
+                anyWarning: coordinator.status.iCloudSyncSuspected
+                          || !coordinator.status.includeInstalled
+            )
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// Menu-bar status icon. Vigil's template-image-with-overlay pattern.
+struct MenuBarLabel: View {
+    let anyMasterAlive: Bool
+    let anyWarning: Bool
+
+    var body: some View {
+        Image(nsImage: renderedImage())
+            .overlay(alignment: .topTrailing) {
+                if anyWarning {
+                    Circle()
+                        .fill(.orange)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 1, y: -1)
+                }
+            }
+            .frame(width: 22, height: 22)
+            .help(tooltip)
+            .accessibilityLabel(tooltip)
+    }
+
+    private var tooltip: String {
+        let base = anyMasterAlive ? "Bastion — ControlMaster active" : "Bastion"
+        return anyWarning ? "\(base) (setup needs attention)" : base
+    }
+
+    private func renderedImage() -> NSImage {
+        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        let symbol = anyMasterAlive ? "link.circle.fill" : "key.horizontal.fill"
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else {
+            return NSImage()
+        }
+        if !anyMasterAlive {
+            base.isTemplate = true
+            return base
+        }
+        let size = base.size
+        let tinted = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemGreen.set()
+            rect.fill()
+            base.draw(
+                in: rect,
+                from: NSRect(origin: .zero, size: size),
+                operation: .destinationIn,
+                fraction: 1.0
+            )
+            return true
+        }
+        tinted.isTemplate = false
+        return tinted
     }
 }
