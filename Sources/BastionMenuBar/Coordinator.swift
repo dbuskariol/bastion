@@ -27,6 +27,20 @@ final class AppCoordinator: ObservableObject {
     @Published var isRefreshing: Bool = false
     @Published var lastConnectError: String? = nil
 
+    /// Derived from `status` after every refresh. The MenuBarExtra
+    /// `label:` closure reads ONLY this, not `status`. Without that
+    /// separation, the App scene's body subscribes to every `@Published`
+    /// mutation on the coordinator (status / lastMessage / isRefreshing,
+    /// three publishes per refresh, every 5 s while the popover is
+    /// open), which invalidates the whole scene and re-runs the
+    /// MenuBarExtra `content:` closure. On macOS 13 that causes the
+    /// MenuBarExtra(.window) popover's hosting NSPanel to keep its
+    /// originally-captured `MenuContentView` whose observation latched
+    /// against the initial empty `StatusReport` — so the popover never
+    /// shows newer hosts even though `lastMessage` updates. Diagnosed
+    /// via dual-model consensus.
+    @Published private(set) var menuBarBadge: MenuBarBadge = .empty
+
     let engine = ConnectionEngine()
     let detector: TerminalDetector
     let factory = TerminalLauncherFactory()
@@ -101,8 +115,17 @@ final class AppCoordinator: ObservableObject {
         defer { isRefreshing = false }
         let report = await engine.snapshot(appVersion: BastionVersion.value)
         await detectAndNotifyTransitions(newReport: report)
+        let newBadge = MenuBarBadge(
+            anyMasterAlive: report.hosts.contains { $0.controlMaster.status == .running },
+            anyWarning: report.iCloudSyncSuspected || !report.includeInstalled
+        )
         self.status = report
         self.lastMessage = "Updated \(Self.timeFormatter.string(from: report.generatedAt))"
+        // Equatable guard: avoid invalidating the App scene unless the
+        // badge actually changed. Most refreshes leave it unchanged.
+        if newBadge != self.menuBarBadge {
+            self.menuBarBadge = newBadge
+        }
         return report
     }
 
@@ -235,6 +258,14 @@ final class AppCoordinator: ObservableObject {
 }
 
 // MARK: - Menu-bar-only preferences store
+
+/// Tiny derived view-model of the only things the MenuBarExtra `label:`
+/// closure needs to read. Equatable so we can guard re-publishes.
+struct MenuBarBadge: Equatable, Sendable {
+    var anyMasterAlive: Bool
+    var anyWarning: Bool
+    static let empty = MenuBarBadge(anyMasterAlive: false, anyWarning: false)
+}
 
 /// Simple wrapper around UserDefaults + preferences.json for the menu
 /// app's per-process preferences. The CLI's PreferencesStore uses the

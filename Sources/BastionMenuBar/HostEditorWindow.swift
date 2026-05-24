@@ -7,25 +7,36 @@ import BastionCore
 /// own native window — so MenuBarExtra(.window) closing the popover on
 /// focus shift doesn't take the editor with it.
 struct HostEditorWindow: View {
-    @ObservedObject var coordinator: AppCoordinator
+    @EnvironmentObject var coordinator: AppCoordinator
     @ObservedObject private var state: HostEditorState
+    private weak var coordinatorRef: AppCoordinator?
 
-    init(coordinator: AppCoordinator) {
-        self.coordinator = coordinator
-        self.state = coordinator.editorState
+    init() {
+        // SwiftUI Window content init is called before the
+        // environment is resolved, so we can't read @EnvironmentObject
+        // here. The state binding happens lazily in body via the
+        // resolved coordinator from the environment.
+        // Use a placeholder; body switches to coordinator.editorState.
+        self.state = HostEditorState()
     }
 
     var body: some View {
+        // Always read state from the *environment-resolved* coordinator,
+        // never from the placeholder we constructed in init.
+        let liveState = coordinator.editorState
         HostEditorView(
             coordinator: coordinator,
-            draft: $state.draft,
-            originalAlias: state.originalAlias,
+            draft: Binding(
+                get: { liveState.draft },
+                set: { liveState.draft = $0 }
+            ),
+            originalAlias: liveState.originalAlias,
             onSaved: {
-                state.isReady = false
+                liveState.isReady = false
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             },
             onCancel: {
-                state.isReady = false
+                liveState.isReady = false
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.host-editor")
             }
         )

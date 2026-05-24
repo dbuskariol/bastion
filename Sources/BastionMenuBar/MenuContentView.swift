@@ -5,8 +5,8 @@ import BastionIdentifiers
 /// The main popover content. Vigil's `MenuContentView` shape adapted to
 /// Bastion's host-list use case.
 struct MenuContentView: View {
-    @ObservedObject var coordinator: AppCoordinator
-    @ObservedObject var updateController: UpdateController
+    @EnvironmentObject var coordinator: AppCoordinator
+    @EnvironmentObject var updateController: UpdateController
     @State private var expandedHostIDs: Set<UUID> = []
     @Environment(\.openWindow) private var openWindow
 
