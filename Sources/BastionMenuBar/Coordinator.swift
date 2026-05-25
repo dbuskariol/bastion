@@ -338,16 +338,20 @@ final class AppCoordinator: ObservableObject {
     }
 
     /// Compare the new report against `lastAliveHosts` and dispatch
-    /// notifications for masters that flipped from alive → dead while
-    /// inside ControlPersist. Coalesces with `notifiedAt` so a flapping
-    /// network doesn't spam Notification Centre.
+    /// notifications for masters that flipped state — both alive → dead
+    /// (the FIDO touch the user paid for has expired and re-auth is
+    /// needed) and dead → alive (a previously-down host came back, e.g.
+    /// after a network blip OR after the user just FIDO'd via the
+    /// terminal). Coalesces with `notifiedAt` (60s debounce per alias)
+    /// so flapping doesn't spam Notification Centre and so the
+    /// explicit connect/unlock paths (which post their own richer
+    /// notifications) don't trigger a duplicate from the next poll.
     private func detectAndNotifyTransitions(newReport: StatusReport) async {
-        guard preferences.notifyOnMasterDrop else {
-            lastAliveHosts = Set(newReport.hosts.filter { $0.controlMaster.status == .running }.map { $0.alias })
-            return
-        }
         let alive = Set(newReport.hosts.filter { $0.controlMaster.status == .running }.map { $0.alias })
+        defer { lastAliveHosts = alive }
+        guard preferences.notifyOnMasterDrop else { return }
         let dropped = lastAliveHosts.subtracting(alive)
+        let connected = alive.subtracting(lastAliveHosts)
         let now = Date()
         for alias in dropped {
             if let last = notifiedAt[alias], now.timeIntervalSince(last) < 60 { continue }
@@ -355,10 +359,30 @@ final class AppCoordinator: ObservableObject {
             await NotificationDispatcher.shared.post(
                 category: .masterDropped,
                 host: alias,
-                body: "The ControlMaster for \(alias) dropped unexpectedly."
+                body: "Authentication expired. Open Bastion and click Unlock for the day to re-authenticate."
             )
         }
-        lastAliveHosts = alive
+        for alias in connected {
+            if let last = notifiedAt[alias], now.timeIntervalSince(last) < 60 { continue }
+            notifiedAt[alias] = now
+            // Best-effort persist label so the notification matches
+            // what the user sees in the chip.
+            let persistLabel: String = {
+                guard let snap = newReport.hosts.first(where: { $0.alias == alias }),
+                      let persist = snap.controlMaster.persistSeconds, persist > 0 else {
+                    return "the persist window"
+                }
+                let h = persist / 3600
+                if h > 0 { return "\(h) hour\(h == 1 ? "" : "s")" }
+                let m = persist / 60
+                return "\(m) minute\(m == 1 ? "" : "s")"
+            }()
+            await NotificationDispatcher.shared.post(
+                category: .masterDropped,
+                host: alias,
+                body: "Authenticated. Connects will be instant for \(persistLabel)."
+            )
+        }
     }
 
     private static let timeFormatter: DateFormatter = {
@@ -554,6 +578,11 @@ final class AppCoordinator: ObservableObject {
             switch outcome {
             case .alive:
                 interactiveAuthStates[alias] = .ready
+                // Mark this alias as just-notified so the next polling
+                // pass's dead→alive transition detection sees the 60s
+                // debounce and doesn't post a second, generic
+                // notification on top of this richer one.
+                notifiedAt[alias] = Date()
                 await NotificationDispatcher.shared.post(
                     category: .masterDropped,
                     host: alias,
@@ -618,6 +647,7 @@ final class AppCoordinator: ObservableObject {
             interactiveAuthStates[alias] = .ready
             let host = (try? engine.loadRegistry())?.host(named: alias)
             let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
+            notifiedAt[alias] = Date()
             await NotificationDispatcher.shared.post(
                 category: .masterDropped, host: alias,
                 body: "Authenticated. Connects will be instant for \(persistLabel)."
@@ -641,6 +671,7 @@ final class AppCoordinator: ObservableObject {
             interactiveAuthStates[alias] = .ready
             let host = (try? engine.loadRegistry())?.host(named: alias)
             let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
+            notifiedAt[alias] = Date()
             await NotificationDispatcher.shared.post(
                 category: .masterDropped, host: alias,
                 body: "Authenticated. Connects will be instant for \(persistLabel)."
@@ -724,7 +755,16 @@ final class MenuBarPreferences: ObservableObject {
     @Published var defaultTerminal: TerminalID? {
         didSet { persist() }
     }
-    @Published var notifyOnMasterDrop: Bool = false { didSet { persist() } }
+    /// Notify on master-state transitions in EITHER direction:
+    ///   alive → dead  (auth expired, re-auth needed)
+    ///   dead → alive  (master came up — either after manual re-auth
+    ///                  in the terminal, or recovery from a network blip)
+    /// Default true: the user gave us notification permission during
+    /// onboarding and the FIDO/SSO lifecycle is the main signal we
+    /// have to surface. The 60s per-alias debounce in
+    /// `detectAndNotifyTransitions` prevents duplicates when the
+    /// explicit connect/unlock paths fire their own richer notification.
+    @Published var notifyOnMasterDrop: Bool = true { didSet { persist() } }
     @Published var notifyOnCertExpiry: Bool = false { didSet { persist() } }
     @Published var notifyOnPersistExpiry: Bool = false { didSet { persist() } }
     @Published var allowRemoteInfoFetch: Bool = false { didSet { persist() } }
