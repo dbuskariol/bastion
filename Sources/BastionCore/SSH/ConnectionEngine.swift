@@ -307,6 +307,11 @@ public final class ConnectionEngine: @unchecked Sendable {
     /// master can't bind). Limited to once per call to prevent an
     /// infinite delete-respawn loop if a buggy server keeps marking
     /// the socket dead.
+    ///
+    /// Also fails fast (~5s) if the foreground `ssh -fNM <alias>` we
+    /// expected to be running has exited without binding a socket
+    /// (FIDO cancelled, second-hop auth failed, target unreachable,
+    /// etc.) — replaces the previous 180s blind wait.
     public func awaitMaster(
         _ alias: String,
         timeout: TimeInterval = 180,
@@ -338,6 +343,14 @@ public final class ConnectionEngine: @unchecked Sendable {
         }
 
         let deadline = Date().addingTimeInterval(timeout)
+        let started = Date()
+        // Grace period for the foreground ssh process to appear. iTerm
+        // first-launch can take a couple of seconds before our typed
+        // command starts ssh. If we don't see the process within this
+        // window, the launcher silently failed (e.g. terminal app
+        // crashed during AppleScript dispatch).
+        let firstAppearanceGrace: TimeInterval = 10
+        var sshProcessEverSeen = false
         var healedOnce = false
         while Date() < deadline {
             let state = (try? await checkMaster(alias))
@@ -362,6 +375,30 @@ public final class ConnectionEngine: @unchecked Sendable {
             default:
                 break
             }
+
+            // Process-aliveness check: did the foreground ssh -fNM exit
+            // without binding a socket? Catches the dropped-FIDO case
+            // (user cancelled), second-hop auth failure with ProxyJump,
+            // target host unreachable, and silent ssh aborts — all
+            // previously surfaced as a 180s "stuck on authenticating".
+            let processes = OrphanReaper.scan(forAlias: alias)
+            if !processes.isEmpty {
+                sshProcessEverSeen = true
+            } else if sshProcessEverSeen {
+                // Was running, now gone, and no master is bound. The
+                // bootstrap died without doing its job. Surface a chip
+                // pointing the user at the terminal for the real error.
+                return .preflightFailed(
+                    "ssh exited without binding the master socket — check the terminal window for the error message (often: second-hop FIDO required, target unreachable, or auth failed)"
+                )
+            } else if Date().timeIntervalSince(started) > firstAppearanceGrace {
+                // We never saw the process appear in `firstAppearanceGrace`
+                // seconds. The terminal launcher silently failed.
+                return .preflightFailed(
+                    "ssh -fNM never started — try reopening your terminal app or selecting a different default terminal in Preferences"
+                )
+            }
+
             try? await Task.sleep(for: .seconds(pollInterval))
         }
         return .timeout
