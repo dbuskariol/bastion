@@ -191,6 +191,26 @@ final class AppCoordinator: ObservableObject {
             }
         }
 
+        // Legacy-master detection (independent of alias scan above):
+        // any socket file in ~/.ssh/sockets/ NOT prefixed with
+        // `bastion-` is from the old %C-style writer. Bastion's
+        // status code now looks at the new path; without surfacing
+        // these the user has masters consuming a FIDO/SSO session
+        // they paid for that are invisible to the menu UI. Per
+        // dual-model + rubber-duck shared-master migration plan.
+        let legacy = await Task.detached {
+            OrphanReaper.scanForLegacyMasters()
+        }.value
+        // The Coordinator's @Published field is keyed by alias for the
+        // UI's per-host card lookup, but legacy detection works at the
+        // SOCKET PATH level (we can't always recover the alias from
+        // `ps`). We surface ALL legacy entries on EVERY host card —
+        // the user takes one action ("Move now") which retires them
+        // wholesale. This is fine because legacy masters are rare
+        // (one-time post-upgrade transient) and the action is
+        // idempotent.
+        self.legacyMasters = legacy
+
         return report
     }
 
@@ -236,6 +256,40 @@ final class AppCoordinator: ObservableObject {
             )
             if !result.pidsFailed.isEmpty {
                 lastError = "Couldn't reap \(result.pidsFailed.count) orphan(s) — they may have already exited or escalated privileges."
+            }
+            await refreshNow()
+        }
+    }
+
+    /// User-initiated retirement of legacy `%C`-style masters from
+    /// before Bastion switched to the stable `bastion-<id>-%p-%r`
+    /// ControlPath. For each detected legacy master:
+    ///
+    ///   1. If we know the alias (recovered from ps), `ssh -O exit
+    ///      <alias>` — that's the cleanest path because ssh resolves
+    ///      the ControlPath via `ssh -G` and goes through its own
+    ///      multiplex protocol.
+    ///   2. If we have the owning PID, SIGTERM (then SIGKILL after
+    ///      500ms if still alive). Same two-pass shape as `reapOrphans`.
+    ///   3. Always best-effort `unlink(2)` the socket file at the end
+    ///      so a future `ssh -O check` against the new path doesn't
+    ///      get confused by leftover Unix-socket files.
+    ///
+    /// The user re-FIDOs once on their next connect; subsequent
+    /// connects multiplex through the shared-master path.
+    func moveLegacyMasters(_ masters: [OrphanReaper.LegacyMaster]) {
+        guard !masters.isEmpty else { return }
+        Task {
+            for master in masters {
+                if let alias = master.alias {
+                    _ = try? await engine.stopMaster(alias)
+                }
+                if let pid = master.pid, kill(pid, 0) == 0 {
+                    _ = kill(pid, SIGTERM)
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if kill(pid, 0) == 0 { _ = kill(pid, SIGKILL) }
+                }
+                try? FileManager.default.removeItem(atPath: master.socketPath)
             }
             await refreshNow()
         }
@@ -408,6 +462,12 @@ final class AppCoordinator: ObservableObject {
     /// detail card when count > 0 AND master is not running for that
     /// alias.
     @Published var orphansByAlias: [String: [OrphanReaper.Orphan]] = [:]
+
+    /// Legacy `%C`-style masters (pre-`bastion-<id>-%p-%r` writer) that
+    /// are still running on the old socket path. Surfaced wholesale in
+    /// every host detail card with a `[Move now]` button. Per
+    /// dual-model + rubber-duck shared-master migration plan.
+    @Published var legacyMasters: [OrphanReaper.LegacyMaster] = []
 
     /// Hosts surfaced in the one-time FIDO migration dialog: those
     /// where `requiresInteractiveAuth==true` but ControlMaster isn't

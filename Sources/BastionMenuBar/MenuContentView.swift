@@ -52,7 +52,9 @@ struct MenuContentView: View {
                                         onDelete: { coordinator.deleteHost(host.alias) },
                                         onUnlock: { coordinator.unlockMaster(host.alias) },
                                         orphanCount: coordinator.orphansByAlias[host.alias]?.count ?? 0,
-                                        onReapOrphans: { coordinator.reapOrphans(for: host.alias) }
+                                        onReapOrphans: { coordinator.reapOrphans(for: host.alias) },
+                                        legacyMasters: coordinator.legacyMasters,
+                                        onMoveLegacy: { coordinator.moveLegacyMasters($0) }
                                     )
                                 }
                             }

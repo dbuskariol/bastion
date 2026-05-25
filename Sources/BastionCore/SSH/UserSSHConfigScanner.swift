@@ -22,6 +22,103 @@ public struct UserSSHConfigScan: Sendable, Equatable {
     /// If `~/.ssh/config` is itself a symlink (chezmoi, dotbot, 1Password
     /// backup), this carries the resolved target. Per rubber-duck B1.
     public let resolvedSymlinkTarget: URL?
+
+    /// Per-block view of every `Host` / `Match host` stanza that sets
+    /// any of `ControlPath`, `ControlMaster`, or `ControlPersist`.
+    /// Powers the cross-name-variant shared-master conflict warnings —
+    /// the Coordinator filters this list against each managed
+    /// `host.hostname` to surface "Your ~/.ssh/config will override
+    /// Bastion's ControlPath" warnings in the editor. Per dual-model
+    /// consensus + rubber-duck on the shared-master design.
+    public let controlPathDeclarations: [ControlPathDeclaration]
+
+    /// True iff the FIRST `ControlPath`-setting directive in the file
+    /// appears BEFORE our `Include` block. When false, Bastion's
+    /// ControlPath is at risk of being shadowed for FQDN-typed
+    /// connections by an earlier user wildcard. Per rubber-duck N1 +
+    /// the dual-model consensus' wildcard-precedence risk #1.
+    public let bastionIncludeIsFirst: Bool
+
+    public init(
+        sentinelInstalled: Bool,
+        existingHostAliases: [String],
+        coveringIncludePresent: Bool,
+        hasMatchExec: Bool,
+        isEmpty: Bool,
+        resolvedSymlinkTarget: URL?,
+        controlPathDeclarations: [ControlPathDeclaration] = [],
+        bastionIncludeIsFirst: Bool = true
+    ) {
+        self.sentinelInstalled = sentinelInstalled
+        self.existingHostAliases = existingHostAliases
+        self.coveringIncludePresent = coveringIncludePresent
+        self.hasMatchExec = hasMatchExec
+        self.isEmpty = isEmpty
+        self.resolvedSymlinkTarget = resolvedSymlinkTarget
+        self.controlPathDeclarations = controlPathDeclarations
+        self.bastionIncludeIsFirst = bastionIncludeIsFirst
+    }
+}
+
+/// One `Host` or `Match host` stanza in the user's config that sets
+/// at least one of the multiplex directives (ControlPath / ControlMaster
+/// / ControlPersist). Used to detect collisions with Bastion's managed
+/// hostnames.
+public struct ControlPathDeclaration: Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable {
+        case hostBlock      // `Host pattern1 pattern2 ...`
+        case matchHost      // `Match host pattern1,pattern2,...`
+    }
+    public let kind: Kind
+    /// Whitespace- (or comma-, for Match-host) separated list of
+    /// patterns as the user wrote them. May contain wildcards.
+    public let patterns: [String]
+    /// Line number in the original file where the stanza header appears.
+    public let lineNumber: Int
+    /// Whether this block is BEFORE Bastion's `Include` (so its
+    /// directives win for any matching host typed on the CLI). When
+    /// false, Bastion's bastion.conf is processed first and wins.
+    public let isBeforeBastionInclude: Bool
+    /// Did the block contain a `ControlPath` line?
+    public let setsControlPath: Bool
+    /// Did the block contain `ControlMaster` (any value)?
+    public let setsControlMaster: Bool
+    /// Did the block contain `ControlPersist` (any value)?
+    public let setsControlPersist: Bool
+
+    /// True if any of the block's patterns matches `hostname` per
+    /// OpenSSH's glob semantics (`*` = any char, `?` = one char,
+    /// case-insensitive). Naive impl, sufficient for warning purposes.
+    public func matches(hostname: String) -> Bool {
+        let target = hostname.lowercased()
+        for pattern in patterns {
+            if Self.glob(pattern.lowercased(), target) { return true }
+        }
+        return false
+    }
+
+    /// `ssh_config(5)` pattern matching subset: `*` matches zero or
+    /// more chars, `?` matches exactly one. Negation (`!pat`) is
+    /// supported in stanzas as "if any negation matches, the stanza
+    /// doesn't apply" — but for the warning use case we conservatively
+    /// treat negations as non-matches (no false alarm).
+    private static func glob(_ pattern: String, _ target: String) -> Bool {
+        if pattern.hasPrefix("!") { return false }
+        // Translate ssh glob → NSRegularExpression.
+        var rx = "^"
+        for ch in pattern {
+            switch ch {
+            case "*": rx.append(".*")
+            case "?": rx.append(".")
+            case ".", "(", ")", "+", "|", "^", "$", "[", "]", "\\", "{", "}":
+                rx.append("\\")
+                rx.append(ch)
+            default: rx.append(ch)
+            }
+        }
+        rx.append("$")
+        return target.range(of: rx, options: [.regularExpression]) != nil
+    }
 }
 
 /// Side effects from an `Include`-injection run.
@@ -78,38 +175,100 @@ public struct UserSSHConfigScanner {
         var coveringIncludePresent = false
         var hasMatchExec = false
         var aliases: [String] = []
+        var declarations: [ControlPathDeclaration] = []
 
-        for rawLine in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+        // Per-stanza tracking. We accumulate directives between Host/
+        // Match headers and emit one ControlPathDeclaration per stanza
+        // that touches any of the multiplex directives.
+        var currentBlock: (kind: ControlPathDeclaration.Kind, patterns: [String], lineNumber: Int, isBeforeInclude: Bool)?
+        var currentSetsControlPath = false
+        var currentSetsControlMaster = false
+        var currentSetsControlPersist = false
+
+        // Track whether we've encountered Bastion's Include (or a
+        // covering Include) yet. Once we have, subsequent stanzas
+        // come AFTER our config — they don't shadow us.
+        var bastionIncludeSeen = false
+
+        func flushCurrentBlock() {
+            if let block = currentBlock,
+               currentSetsControlPath || currentSetsControlMaster || currentSetsControlPersist {
+                declarations.append(ControlPathDeclaration(
+                    kind: block.kind,
+                    patterns: block.patterns,
+                    lineNumber: block.lineNumber,
+                    isBeforeBastionInclude: block.isBeforeInclude,
+                    setsControlPath: currentSetsControlPath,
+                    setsControlMaster: currentSetsControlMaster,
+                    setsControlPersist: currentSetsControlPersist
+                ))
+            }
+            currentBlock = nil
+            currentSetsControlPath = false
+            currentSetsControlMaster = false
+            currentSetsControlPersist = false
+        }
+
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+        for (idx, rawLine) in lines {
+            let lineNumber = idx + 1
             let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
             if trimmed == Paths.includeBlockBegin {
                 sentinelInstalled = true
+                bastionIncludeSeen = true
                 continue
             }
             if trimmed.hasPrefix("#") { continue }
             if trimmed.isEmpty { continue }
 
-            // ssh_config keys are case-insensitive.
             let lower = trimmed.lowercased()
             if lower.hasPrefix("include ") || lower.hasPrefix("include\t") || lower == "include" {
-                // Strip leading "include" + whitespace, normalise.
                 var rest = String(trimmed.dropFirst("include".count))
                 rest = rest.trimmingCharacters(in: .whitespaces)
                 if includeMatchesOurGlob(rest) {
                     coveringIncludePresent = true
+                    bastionIncludeSeen = true
                 }
             } else if lower.hasPrefix("host ") || lower.hasPrefix("host\t") {
+                flushCurrentBlock()
                 let rest = String(trimmed.dropFirst("host".count))
-                let names = rest.split(whereSeparator: { $0 == " " || $0 == "\t" })
+                let names = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
                 for name in names where name != "*" {
-                    let s = String(name)
-                    if Alias.isValid(s) { aliases.append(s) }
+                    if Alias.isValid(name) { aliases.append(name) }
                 }
+                currentBlock = (kind: .hostBlock, patterns: names,
+                                lineNumber: lineNumber,
+                                isBeforeInclude: !bastionIncludeSeen)
             } else if lower.hasPrefix("match ") || lower.hasPrefix("match\t") {
-                let rest = String(trimmed.dropFirst("match".count)).lowercased()
-                if rest.contains("exec ") || rest.contains("exec\t") || rest.contains("exec\"") {
+                flushCurrentBlock()
+                let rest = String(trimmed.dropFirst("match".count)).trimmingCharacters(in: .whitespaces)
+                let restLower = rest.lowercased()
+                if restLower.contains("exec ") || restLower.contains("exec\t") || restLower.contains("exec\"") {
                     hasMatchExec = true
                 }
+                // Parse `Match host pat1,pat2 [user x] [...]` — we only
+                // care about the `host` criterion for collision detection.
+                if let patterns = Self.extractMatchHostPatterns(rest) {
+                    currentBlock = (kind: .matchHost, patterns: patterns,
+                                    lineNumber: lineNumber,
+                                    isBeforeInclude: !bastionIncludeSeen)
+                }
+            } else if currentBlock != nil {
+                // We're inside a Host/Match stanza. Look for the three
+                // multiplex directives.
+                if lower.hasPrefix("controlpath") { currentSetsControlPath = true }
+                else if lower.hasPrefix("controlmaster") { currentSetsControlMaster = true }
+                else if lower.hasPrefix("controlpersist") { currentSetsControlPersist = true }
             }
+        }
+        flushCurrentBlock()
+
+        // Bastion include is "first" iff we have our sentinel AND no
+        // earlier stanza set a ControlPath directive. (We don't worry
+        // about the "no sentinel but covering include later" case —
+        // that's just "no Bastion config yet".)
+        let bastionIncludeIsFirst = !declarations.contains { decl in
+            decl.isBeforeBastionInclude && decl.setsControlPath
         }
 
         return UserSSHConfigScan(
@@ -118,8 +277,41 @@ public struct UserSSHConfigScanner {
             coveringIncludePresent: coveringIncludePresent,
             hasMatchExec: hasMatchExec,
             isEmpty: false,
-            resolvedSymlinkTarget: symlinkTarget
+            resolvedSymlinkTarget: symlinkTarget,
+            controlPathDeclarations: declarations,
+            bastionIncludeIsFirst: bastionIncludeIsFirst
         )
+    }
+
+    /// Parse the criteria of a `Match` line and return the host
+    /// pattern(s) if the `host` criterion is present. Returns nil for
+    /// `Match all` / `Match originalhost`/`Match user`/etc. without
+    /// `host`. Handles comma-separated host lists.
+    static func extractMatchHostPatterns(_ rest: String) -> [String]? {
+        // Tokenise on whitespace; walk looking for `host` followed by
+        // the next non-keyword token.
+        let tokens = rest.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        var i = 0
+        while i < tokens.count {
+            let key = tokens[i].lowercased()
+            if key == "host" || key == "originalhost" {
+                if i + 1 < tokens.count {
+                    let list = tokens[i + 1]
+                    return list.split(separator: ",").map { String($0) }
+                }
+                return nil
+            }
+            // Skip known one-arg criteria.
+            if key == "user" || key == "localuser" || key == "exec" || key == "address" {
+                i += 2; continue
+            }
+            // Skip zero-arg criteria.
+            if key == "all" || key == "canonical" || key == "final" || key == "tagged" {
+                i += 1; continue
+            }
+            i += 1
+        }
+        return nil
     }
 
     // MARK: - Install / uninstall the sentinel-guarded Include
