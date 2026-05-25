@@ -531,6 +531,15 @@ final class AppCoordinator: ObservableObject {
         if host?.requiresInteractiveAuth == true {
             // FIDO bootstrap: launch foreground `ssh -fNM` for the
             // FIDO touch, then poll for the master.
+            //
+            // Defensive mkdir: even though the writer creates this dir
+            // on every save, a host could have been added by a prior
+            // version, or the user could have deleted ~/.ssh/sockets
+            // manually. Without it, ssh succeeds at auth and then
+            // silently fails to bind the socket — visible to the user
+            // as a stuck "authenticating" chip until awaitMaster's
+            // 180s timeout.
+            try? Paths.ensureSocketsDirectoryExists()
             interactiveAuthStates[alias] = .authenticating(since: Date())
             launch(
                 launcher: launcher,
@@ -598,6 +607,9 @@ final class AppCoordinator: ObservableObject {
         }
         let launcher = factory.launcher(for: terminalID)
         let env = engine.pathResolver.environment()
+
+        // Defensive mkdir before any ssh -fNM (same reason as connectImpl).
+        try? Paths.ensureSocketsDirectoryExists()
 
         // Try BatchMode fast-path first (cached creds via agent or
         // passkey). Skip foreground launch if it succeeds.

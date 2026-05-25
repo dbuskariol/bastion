@@ -157,6 +157,12 @@ public struct ManagedConfigWriter {
                 withIntermediateDirectories: true,
                 attributes: [FileAttributeKey.posixPermissions: 0o700]
             )
+            // The bastion.conf we're about to write points ControlPath
+            // at ~/.ssh/sockets/%C. OpenSSH does NOT auto-create that
+            // parent dir; without it, the master daemon silently fails
+            // to bind after a successful FIDO/password auth. The writer
+            // owns the conf, so the writer owns the dir it references.
+            try Paths.ensureSocketsDirectoryExists()
         } catch {
             throw SSHConfigError.io("mkdir ~/.ssh/config.d: \(error.localizedDescription)")
         }

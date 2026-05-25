@@ -257,6 +257,12 @@ public final class ConnectionEngine: @unchecked Sendable {
         _ alias: String,
         timeout: TimeInterval = 2.0
     ) async -> ProcessRunResult? {
+        // Belt-and-suspenders: ensure ~/.ssh/sockets/ exists. The writer
+        // creates it on every save, but a host may have been added by a
+        // prior version (or the user may have deleted the dir manually).
+        // Without the parent dir, ssh succeeds at auth but silently
+        // fails to bind the socket, which the user sees as a 180s hang.
+        try? Paths.ensureSocketsDirectoryExists()
         let env = pathResolver.environment()
         // -o ConnectTimeout caps the TCP-connect phase server-side; the
         // Task-level timeout caps the post-connect (auth) phase. Belt+suspenders.
@@ -306,6 +312,31 @@ public final class ConnectionEngine: @unchecked Sendable {
         timeout: TimeInterval = 180,
         pollInterval: TimeInterval = 1
     ) async -> AwaitMasterOutcome {
+        // Pre-flight: if the configured ControlPath's parent dir doesn't
+        // exist, polling will never succeed because OpenSSH won't create
+        // it. Surface immediately so the user gets an actionable chip
+        // within ~500ms instead of waiting 180s for "auth didn't
+        // complete". Cheap to evaluate (one ssh -G + one stat).
+        if let cfg = try? await reader.effectiveConfig(forAlias: alias),
+           let socketPath = cfg.usableControlPath {
+            let expanded = NSString(string: socketPath).expandingTildeInPath
+            let parent = (expanded as NSString).deletingLastPathComponent
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: parent, isDirectory: &isDir)
+            if !exists || !isDir.boolValue {
+                // Try a one-shot recovery: many users hit this because
+                // the dir was deleted between a save and a connect, or
+                // because they're on a brand-new install whose first
+                // save predated this fix. If we can mkdir it, do so and
+                // continue polling instead of failing the user's flow.
+                try? Paths.ensureSocketsDirectoryExists()
+                let recovered = FileManager.default.fileExists(atPath: parent, isDirectory: &isDir) && isDir.boolValue
+                if !recovered {
+                    return .preflightFailed("ControlPath parent dir \(parent) doesn't exist and couldn't be created")
+                }
+            }
+        }
+
         let deadline = Date().addingTimeInterval(timeout)
         var healedOnce = false
         while Date() < deadline {
