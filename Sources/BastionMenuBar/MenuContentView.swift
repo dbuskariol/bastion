@@ -1,13 +1,6 @@
 import SwiftUI
-import os
 import BastionCore
 import BastionIdentifiers
-
-/// Logger for popover layout/observation debugging. NSLog from a
-/// SwiftUI body doesn't surface reliably under `process == "Bastion"`
-/// in `log show`; `os.Logger` with an explicit subsystem does.
-///   log stream --predicate 'subsystem == "com.bastion.menu"' --level info
-private let popoverLog = Logger(subsystem: "com.bastion.menu", category: "popover")
 
 /// The main popover content. Vigil's `MenuContentView` shape adapted to
 /// Bastion's host-list use case.
@@ -25,77 +18,42 @@ struct MenuContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        // Per dual-model consensus: the body re-evaluates correctly on
-        // every refresh (proven empirically — `lastMessage` and warning
-        // chips update), but the host-list region was producing zero
-        // visible output on macOS 13. Root cause: `MenuBarExtra(.window)`'s
-        // private NSPanel does NOT re-negotiate `intrinsicContentSize`
-        // when the body transitions from `emptyState` to `ScrollView`
-        // with N rows. `Text` and warning-chip leaves don't need a
-        // layout pass so they update fine; the `ScrollView` (with no
-        // minHeight) collapses to 0pt in the size-locked NSPanel and
-        // the host list is rendered but invisible. Fix: enforce a
-        // `minHeight` on both branches so neither can collapse below
-        // a sane floor, AND on the root VStack so the panel has a
-        // stable size to negotiate against.
-        let hostCount = coordinator.status.hosts.count
-        popoverLog.info("body eval: hosts=\(hostCount, privacy: .public) rev=\(self.coordinator.menuRevision, privacy: .public) lastMsg=\(self.coordinator.lastMessage, privacy: .public)")
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             header
             Divider()
             errorBanner
-            // Eager VStack (not LazyVStack) — at <=200 hosts in a 380pt
-            // popover, virtualisation cost is trivial and we avoid the
-            // class of macOS 13 SwiftUI bugs where lazy children fail
-            // to materialise after a hosting-view cycle.
+            // Direct VStack (no ScrollView) when host count is small:
+            // the popover grows naturally to fit content. NSPopover's
+            // `contentSize` is driven by `NSHostingController.preferred
+            // ContentSize` (set up in AppDelegate.setUpPopover via
+            // `sizingOptions = [.preferredContentSize]`), so adding /
+            // removing / expanding hosts dynamically resizes the
+            // popover with no manual frame management.
+            //
+            // For very large host lists, wrap in a ScrollView with a
+            // sane cap so the popover doesn't exceed screen height.
             if coordinator.status.hosts.isEmpty {
                 emptyState
+            } else if coordinator.status.hosts.count <= 12 && expandedHostIDs.isEmpty {
+                hostList
+                    .padding(.vertical, 4)
+            } else if coordinator.status.hosts.count <= 8 {
+                // Small-ish list with some expanded cards — still fits
+                // comfortably without scrolling.
+                hostList
+                    .padding(.vertical, 4)
             } else {
                 ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(coordinator.status.hosts) { host in
-                            VStack(spacing: 4) {
-                                HostRow(
-                                    host: host,
-                                    expanded: binding(for: host.id),
-                                    authState: coordinator.authState(for: host),
-                                    onConnect: { coordinator.connect(host.alias) }
-                                )
-                                .contextMenu {
-                                    contextMenu(for: host)
-                                }
-                                if expandedHostIDs.contains(host.id) {
-                                    HostDetailCard(
-                                        host: host,
-                                        onDisconnect: { coordinator.disconnectMaster(host.alias) },
-                                        onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
-                                        onConnect: { coordinator.connect(host.alias) },
-                                        onEdit: { openEditor(for: host.alias) },
-                                        onDelete: { coordinator.deleteHost(host.alias) },
-                                        onUnlock: { coordinator.unlockMaster(host.alias) },
-                                        orphanCount: coordinator.orphansByAlias[host.alias]?.count ?? 0,
-                                        onReapOrphans: { coordinator.reapOrphans(for: host.alias) }
-                                    )
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    hostList
+                        .padding(.vertical, 4)
                 }
-                // minHeight is load-bearing — see comment at top of body.
-                .frame(minHeight: 120, maxHeight: 420)
+                .frame(maxHeight: 600)
             }
             Divider()
             footer
         }
-        .id(coordinator.menuRevision)
-        // minHeight on the root ensures the NSPanel has a stable size
-        // floor it can grow from, instead of locking to the smallest
-        // intrinsic ever observed.
-        .frame(minWidth: 380, idealWidth: 380, maxWidth: 380, minHeight: 180)
+        .frame(width: 380)
         .onAppear {
-            popoverLog.info("onAppear: hosts=\(self.coordinator.status.hosts.count, privacy: .public) rev=\(self.coordinator.menuRevision, privacy: .public)")
             coordinator.popoverDidOpen()
         }
         .onDisappear { coordinator.popoverDidClose() }
@@ -247,6 +205,42 @@ struct MenuContentView: View {
 
     // MARK: - Empty state
 
+    /// Per-host list extracted to a computed view so it can be
+    /// rendered directly (small lists) or wrapped in a ScrollView
+    /// (large lists), without duplicating the ForEach body.
+    @ViewBuilder
+    private var hostList: some View {
+        VStack(spacing: 4) {
+            ForEach(coordinator.status.hosts) { host in
+                VStack(spacing: 4) {
+                    HostRow(
+                        host: host,
+                        expanded: binding(for: host.id),
+                        authState: coordinator.authState(for: host),
+                        onConnect: { coordinator.connect(host.alias) }
+                    )
+                    .contextMenu {
+                        contextMenu(for: host)
+                    }
+                    if expandedHostIDs.contains(host.id) {
+                        HostDetailCard(
+                            host: host,
+                            onDisconnect: { coordinator.disconnectMaster(host.alias) },
+                            onCopyCommand: { coordinator.copyConnectCommand(host.alias) },
+                            onConnect: { coordinator.connect(host.alias) },
+                            onEdit: { openEditor(for: host.alias) },
+                            onDelete: { coordinator.deleteHost(host.alias) },
+                            onUnlock: { coordinator.unlockMaster(host.alias) },
+                            orphanCount: coordinator.orphansByAlias[host.alias]?.count ?? 0,
+                            onReapOrphans: { coordinator.reapOrphans(for: host.alias) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+        }
+    }
+
     @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 8) {
@@ -264,11 +258,7 @@ struct MenuContentView: View {
             Button("Add host") { openEditor() }
                 .padding(.bottom, 14)
         }
-        // Match the populated branch's `.frame(minHeight:)` so the
-        // NSPanel sizes the popover consistently regardless of which
-        // branch is active — see body's comment about NSPanel size
-        // negotiation on macOS 13.
-        .frame(maxWidth: .infinity, minHeight: 120)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Footer

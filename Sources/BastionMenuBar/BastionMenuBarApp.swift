@@ -1,52 +1,30 @@
 import SwiftUI
+import AppKit
 import BastionCore
 import BastionIdentifiers
 
 @main
 struct BastionMenuBarApp: App {
-    @StateObject private var coordinator = AppCoordinator()
-    @StateObject private var updateController = UpdateController()
-    @Environment(\.openWindow) private var openWindow
-
-    /// Sticky flag — once the user has gone through (or dismissed) the
-    /// onboarding window, never re-trigger it automatically.
-    @AppStorage("bastion.onboarding.shown") private var onboardingHasShown: Bool = false
+    // AppDelegate owns the menu-bar surface (NSStatusItem + NSPopover)
+    // AND the coordinator/updateController. We deliberately do NOT
+    // hold `@StateObject` references at App scope — those subscribe
+    // the App's body to the underlying ObservableObject, which on
+    // macOS 13 cascaded into Scene rebuilds + observation churn that
+    // broke `MenuBarExtra(.window)`'s NSPanel hosting. With AppKit-
+    // level menu bar code and a delegate-owned coordinator, the App
+    // scope never observes coordinator @Published changes.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            // Inject the coordinator + update controller via environment
-            // so MenuContentView (hosted inside MenuBarExtra(.window)'s
-            // private NSPanel) re-subscribes at view-tree insertion time
-            // — rather than relying on a constructor-captured
-            // @ObservedObject wrapper that the panel latches on first
-            // open and never re-arms when the App scene re-evaluates.
-            // Diagnosed via dual-model consensus.
-            MenuContentView()
-                .environmentObject(coordinator)
-                .environmentObject(updateController)
-        } label: {
-            // CRITICAL: do NOT read any `coordinator.@Published` directly
-            // in this closure. Wrap the badge consumption in a child
-            // view (`MenuBarLabelBadge`) that does the observation
-            // internally. Reading `coordinator.menuBarBadge.X` here
-            // re-evaluates the App scene on every badge change, which
-            // tears down the popover's hosting NSPanel and breaks its
-            // observation chain — visible to the user as "popover shows
-            // stale state forever after the first poll-induced badge
-            // transition". Same root cause as why we don't read
-            // `coordinator.status` here. Diagnosed via dual-model
-            // consensus + rubber-duck, second pass.
-            MenuBarLabelBadge(coordinator: coordinator)
-                .background(OnboardingTrigger(coordinator: coordinator, hasShown: $onboardingHasShown))
-        }
-        .menuBarExtraStyle(.window)
-
+        // Setup window — auto-opened on first launch by AppDelegate
+        // via NotificationCenter, manually re-openable via the popover.
         Window("Bastion Setup", id: "bastion.setup") {
-            OnboardingWindow(coordinator: coordinator) {
-                onboardingHasShown = true
+            OnboardingWindow(coordinator: appDelegate.coordinator) {
+                UserDefaults.standard.set(true, forKey: "bastion.onboarding.shown")
                 ActivationPolicyManager.shared.closeWindow(identifierPrefix: "bastion.setup")
             }
-            .environmentObject(coordinator)
+            .environmentObject(appDelegate.coordinator)
+            .background(OpenWindowBridge())
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -56,71 +34,35 @@ struct BastionMenuBarApp: App {
 
         Window("Host", id: "bastion.host-editor") {
             HostEditorWindow()
-                .environmentObject(coordinator)
+                .environmentObject(appDelegate.coordinator)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
     }
 }
 
-/// Auto-opens the Setup window once on first launch. Hosted inside the
-/// MenuBarExtra label's `.background` so it's always in the scene graph
-/// (Vigil pattern). Backed by `@AppStorage` because `@State` here resets
-/// every time SwiftUI recreates the trigger view (which happens whenever
-/// the menu-bar label re-renders), which was the bug source: every host
-/// add caused the wizard to re-fire.
-///
-/// Coordinator is passed as a plain `let`, NOT `@ObservedObject`. We
-/// only consult it inside `onAppear` (one-shot action, not observation)
-/// — observing here would cause this view to re-render on every poll
-/// refresh, which cascades into App-scene re-evaluation and tears down
-/// the popover hosting view's observation chain. The popover then
-/// shows stale state forever. Diagnosed via dual-model consensus +
-/// rubber-duck, second pass.
-private struct OnboardingTrigger: View {
-    let coordinator: AppCoordinator
-    @Binding var hasShown: Bool
+/// Invisible bridge between AppDelegate's onboarding-trigger
+/// NotificationCenter post and SwiftUI's `\.openWindow` action.
+/// AppDelegate runs outside the SwiftUI environment so it can't call
+/// openWindow directly; this view lives inside the Setup Window scene's
+/// scope so when the notification fires, `openWindow(id:)` works.
+private struct OpenWindowBridge: View {
     @Environment(\.openWindow) private var openWindow
-
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .onAppear {
-                guard !hasShown else { return }
-                Task {
-                    // Wait briefly so the initial status refresh populates.
-                    try? await Task.sleep(for: .milliseconds(800))
-                    guard !hasShown else { return }
-                    let isEmpty = coordinator.engine.store.isEmpty()
-                    if isEmpty {
-                        await MainActor.run {
-                            hasShown = true
-                            openWindow(id: "bastion.setup")
-                        }
-                    } else {
-                        // Hosts exist — user is past first run. Mark
-                        // onboarding as already shown so we never
-                        // auto-open it for them.
-                        await MainActor.run { hasShown = true }
-                    }
-                }
+            .onReceive(NotificationCenter.default.publisher(for: .bastionRequestOpenSetupWindow)) { _ in
+                openWindow(id: "bastion.setup")
             }
     }
 }
 
 /// Wrapper around `MenuBarLabel` that owns the @ObservedObject
-/// subscription to the coordinator. This view re-renders on every
-/// `menuBarBadge` change — which is fine because it's a leaf view
-/// (`Image` + overlay) — but crucially the SUBSCRIPTION lives here
-/// instead of in the App scene's label closure. Reading
-/// `coordinator.menuBarBadge.X` at the App-scene scope re-evaluates
-/// the App body on every badge change, which tears down the
-/// MenuBarExtra(.window) popover's hosting NSPanel and breaks its
-/// observation of `coordinator.status.hosts`. Visible to the user as
-/// a popover that shows the empty initial state forever after the
-/// first poll-induced badge transition (e.g. masters come up after
-/// the user's first FIDO touch since launch).
-private struct MenuBarLabelBadge: View {
+/// subscription to the coordinator. Hosted via `NSHostingView` inside
+/// the `NSStatusItem.button` by `AppDelegate`. Observation lives here
+/// (a leaf SwiftUI tree) so badge changes redraw the icon without
+/// touching the App scene.
+struct MenuBarLabelBadge: View {
     @ObservedObject var coordinator: AppCoordinator
     var body: some View {
         MenuBarLabel(

@@ -1,14 +1,8 @@
 import Foundation
 import SwiftUI
 import Combine
-import os
 import BastionCore
 import BastionIdentifiers
-
-/// Logger for refresh/coordination diagnostics. Matches the subsystem
-/// used by the menu UI so `log stream --predicate 'subsystem ==
-/// "com.bastion.menu"'` shows the full pipeline in one view.
-private let refreshLog = Logger(subsystem: "com.bastion.menu", category: "refresh")
 
 /// Shared state for the host editor window. Owned by AppCoordinator
 /// so opening the editor from anywhere (popover '+' button, host
@@ -144,31 +138,20 @@ final class AppCoordinator: ObservableObject {
             anyMasterAlive: report.hosts.contains { $0.controlMaster.status == .running },
             anyWarning: report.iCloudSyncSuspected || !report.includeInstalled
         )
-        // Detect host-set changes between refreshes. Bump menuRevision
-        // so the popover's `.id(menuRevision)` remount kicks in and
-        // SwiftUI rebuilds the host-list subtree — needed because the
-        // macOS 13 MenuBarExtra(.window) hosting view materialises ONCE
-        // at first popover-open and can keep stale `coordinator.status`
-        // (empty at init) even after @Published updates fire. Catches:
-        //   - first refresh after app launch (was empty → now N hosts)
-        //   - hosts added/removed via the CLI while the app is running
-        //   - sync via `bastion config sync` etc.
-        // No bump for transient state-only changes (e.g. master alive ↔
-        // dead) — those rely on @Published of `controlMaster.status`
-        // inside the HostRow subview, which works fine on macOS 13.
-        let oldAliases = Set(status.hosts.map { $0.alias.lowercased() })
-        let newAliases = Set(report.hosts.map { $0.alias.lowercased() })
-        let hostSetChanged = oldAliases != newAliases
-
         self.status = report
         self.lastMessage = "Updated \(Self.timeFormatter.string(from: report.generatedAt))"
         if newBadge != self.menuBarBadge {
             self.menuBarBadge = newBadge
         }
-        if hostSetChanged {
-            menuRevision &+= 1
-        }
-        refreshLog.info("refreshNow done: hosts=\(report.hosts.count, privacy: .public) setChanged=\(hostSetChanged ? "YES" : "no", privacy: .public) menuRevision=\(self.menuRevision, privacy: .public) badge=(alive=\(newBadge.anyMasterAlive ? "YES" : "no", privacy: .public),warn=\(newBadge.anyWarning ? "YES" : "no", privacy: .public)) popoverOpen=\(self.popoverIsOpen ? "YES" : "no", privacy: .public)")
+        // `menuRevision` is still bumped on explicit mutations (upsert,
+        // delete, install-include, import) to give the popover a clean
+        // remount signal in those edge cases — but we no longer touch
+        // it during routine refreshes. With AppKit-level NSPopover +
+        // NSHostingController.preferredContentSize wiring (see
+        // `AppDelegate.setUpPopover`), the popover re-negotiates its
+        // size and observation chain on its own; the `.id(menuRevision)`
+        // remount workaround the SwiftUI MenuBarExtra(.window) needed
+        // is gone with the migration.
 
         // Refresh orphan detection. Only scan for hosts whose master is
         // NOT running — a running master means the `ssh -fNM` we'd
