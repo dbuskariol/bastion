@@ -116,10 +116,10 @@ public struct BastionConfigWriter {
 
         // Per dual-model consensus + rubber-duck pass: emit a parallel
         // `Match host <hostname>` block so connections typed as the
-        // full hostname (`ssh bastion.example.internal`,
-        // VS Code Remote-SSH using the full name, git remotes using
-        // the full name, …) share Bastion's master with the alias-typed
-        // form (`ssh bastion`). The Match block re-asserts the
+        // full hostname (`ssh bastion.example.internal`, VS Code
+        // Remote-SSH using the full name, git remotes using the full
+        // name, …) share Bastion's master with the alias-typed form
+        // (`ssh bastion`). The Match block re-asserts the
         // multiplex directives + identity directives + Bastion-managed
         // proxy directives. See `matchBlockLines` for the rubber-duck
         // findings driving each re-assertion.

@@ -52,23 +52,23 @@ struct BastionConfigWriterTests {
         let id = UUID(uuidString: "abcdef01-2345-6789-abcd-ef0123456789")!
         let host = ManagedHost(
             id: id,
-            alias: "bastion",
-            hostname: "bastion.example.internal",
+            alias: "prodjump",
+            hostname: "prodjump.example.internal",
             user: "alice",
             identityFiles: ["/Users/test/.ssh/id_rsa"],
             controlMaster: .on,
             controlPersist: .hours(8),
-            advanced: [.proxyJump: "bastion-jump.example.com"]
+            advanced: [.proxyJump: "bastion.example.com"]
         )
         let output = try writer.render(HostRegistry(hosts: [host]))
         // Primary Host stanza:
-        #expect(output.contains("Host bastion"))
-        #expect(output.contains("    HostName bastion.example.internal"))
+        #expect(output.contains("Host prodjump"))
+        #expect(output.contains("    HostName prodjump.example.internal"))
         #expect(output.contains("    ControlPath ~/.ssh/sockets/bastion-abcdef012345-%p-%r"))
         // Match block:
-        #expect(output.contains("Match host bastion.example.internal"))
+        #expect(output.contains("Match host prodjump.example.internal"))
         // B1 fix: no `user <user>` qualifier on the Match line.
-        #expect(!output.contains("Match host bastion.example.internal user"))
+        #expect(!output.contains("Match host prodjump.example.internal user"))
         // B1 fix: User INSIDE the block.
         let matchBlockStart = output.range(of: "Match host")!.lowerBound
         let afterMatch = String(output[matchBlockStart...])
@@ -77,7 +77,7 @@ struct BastionConfigWriterTests {
         #expect(afterMatch.contains("    IdentityFile /Users/test/.ssh/id_rsa"))
         #expect(afterMatch.contains("    IdentitiesOnly yes"))
         // N1: ProxyJump re-asserted because Bastion has it explicitly.
-        #expect(afterMatch.contains("    ProxyJump bastion-jump.example.com"))
+        #expect(afterMatch.contains("    ProxyJump bastion.example.com"))
         // Multiplex trio re-asserted in the Match block too.
         #expect(afterMatch.contains("    ControlMaster auto"))
         #expect(afterMatch.contains("    ControlPath ~/.ssh/sockets/bastion-abcdef012345-%p-%r"))
