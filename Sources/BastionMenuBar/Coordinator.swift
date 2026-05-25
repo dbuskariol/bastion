@@ -1,8 +1,14 @@
 import Foundation
 import SwiftUI
 import Combine
+import os
 import BastionCore
 import BastionIdentifiers
+
+/// Logger for refresh/coordination diagnostics. Matches the subsystem
+/// used by the menu UI so `log stream --predicate 'subsystem ==
+/// "com.bastion.menu"'` shows the full pipeline in one view.
+private let refreshLog = Logger(subsystem: "com.bastion.menu", category: "refresh")
 
 /// Shared state for the host editor window. Owned by AppCoordinator
 /// so opening the editor from anywhere (popover '+' button, host
@@ -162,6 +168,7 @@ final class AppCoordinator: ObservableObject {
         if hostSetChanged {
             menuRevision &+= 1
         }
+        refreshLog.info("refreshNow done: hosts=\(report.hosts.count, privacy: .public) setChanged=\(hostSetChanged ? "YES" : "no", privacy: .public) menuRevision=\(self.menuRevision, privacy: .public) badge=(alive=\(newBadge.anyMasterAlive ? "YES" : "no", privacy: .public),warn=\(newBadge.anyWarning ? "YES" : "no", privacy: .public)) popoverOpen=\(self.popoverIsOpen ? "YES" : "no", privacy: .public)")
 
         // Refresh orphan detection. Only scan for hosts whose master is
         // NOT running — a running master means the `ssh -fNM` we'd

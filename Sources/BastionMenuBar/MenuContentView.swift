@@ -1,6 +1,13 @@
 import SwiftUI
+import os
 import BastionCore
 import BastionIdentifiers
+
+/// Logger for popover layout/observation debugging. NSLog from a
+/// SwiftUI body doesn't surface reliably under `process == "Bastion"`
+/// in `log show`; `os.Logger` with an explicit subsystem does.
+///   log stream --predicate 'subsystem == "com.bastion.menu"' --level info
+private let popoverLog = Logger(subsystem: "com.bastion.menu", category: "popover")
 
 /// The main popover content. Vigil's `MenuContentView` shape adapted to
 /// Bastion's host-list use case.
@@ -18,7 +25,22 @@ struct MenuContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Per dual-model consensus: the body re-evaluates correctly on
+        // every refresh (proven empirically — `lastMessage` and warning
+        // chips update), but the host-list region was producing zero
+        // visible output on macOS 13. Root cause: `MenuBarExtra(.window)`'s
+        // private NSPanel does NOT re-negotiate `intrinsicContentSize`
+        // when the body transitions from `emptyState` to `ScrollView`
+        // with N rows. `Text` and warning-chip leaves don't need a
+        // layout pass so they update fine; the `ScrollView` (with no
+        // minHeight) collapses to 0pt in the size-locked NSPanel and
+        // the host list is rendered but invisible. Fix: enforce a
+        // `minHeight` on both branches so neither can collapse below
+        // a sane floor, AND on the root VStack so the panel has a
+        // stable size to negotiate against.
+        let hostCount = coordinator.status.hosts.count
+        popoverLog.info("body eval: hosts=\(hostCount, privacy: .public) rev=\(self.coordinator.menuRevision, privacy: .public) lastMsg=\(self.coordinator.lastMessage, privacy: .public)")
+        return VStack(spacing: 0) {
             header
             Divider()
             errorBanner
@@ -61,17 +83,19 @@ struct MenuContentView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .frame(maxHeight: 420)
+                // minHeight is load-bearing — see comment at top of body.
+                .frame(minHeight: 120, maxHeight: 420)
             }
             Divider()
             footer
         }
         .id(coordinator.menuRevision)
-        .frame(width: 380)
+        // minHeight on the root ensures the NSPanel has a stable size
+        // floor it can grow from, instead of locking to the smallest
+        // intrinsic ever observed.
+        .frame(minWidth: 380, idealWidth: 380, maxWidth: 380, minHeight: 180)
         .onAppear {
-            #if DEBUG
-            print("[MenuContentView] onAppear menuRevision=\(coordinator.menuRevision) hosts=\(coordinator.status.hosts.count)")
-            #endif
+            popoverLog.info("onAppear: hosts=\(self.coordinator.status.hosts.count, privacy: .public) rev=\(self.coordinator.menuRevision, privacy: .public)")
             coordinator.popoverDidOpen()
         }
         .onDisappear { coordinator.popoverDidClose() }
@@ -240,7 +264,11 @@ struct MenuContentView: View {
             Button("Add host") { openEditor() }
                 .padding(.bottom, 14)
         }
-        .frame(maxWidth: .infinity)
+        // Match the populated branch's `.frame(minHeight:)` so the
+        // NSPanel sizes the popover consistently regardless of which
+        // branch is active — see body's comment about NSPanel size
+        // negotiation on macOS 13.
+        .frame(maxWidth: .infinity, minHeight: 120)
     }
 
     // MARK: - Footer
