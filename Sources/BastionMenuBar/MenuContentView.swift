@@ -151,7 +151,7 @@ struct MenuContentView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Bastion")
                     .font(.system(size: 13, weight: .semibold))
-                Text(coordinator.lastMessage)
+                Text(headerSubtitle)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -164,6 +164,27 @@ struct MenuContentView: View {
             .help("Add host")
         }
         .padding(10)
+    }
+
+    /// Status subtitle for the header. Vigil's pattern — concise
+    /// summary of current state, e.g. "Idle" or "Keeping your Mac
+    /// awake". For Bastion: count of hosts and active masters.
+    /// The timestamp lives in the footer now.
+    private var headerSubtitle: String {
+        let hosts = coordinator.status.hosts
+        if hosts.isEmpty {
+            return "No hosts yet"
+        }
+        let alive = hosts.filter { $0.controlMaster.status == .running }.count
+        let hostsWord = hosts.count == 1 ? "host" : "hosts"
+        switch alive {
+        case 0:
+            return "\(hosts.count) \(hostsWord) · idle"
+        case hosts.count:
+            return "\(hosts.count) \(hostsWord) · all authenticated"
+        default:
+            return "\(hosts.count) \(hostsWord) · \(alive) authenticated"
+        }
     }
 
     @ViewBuilder
@@ -263,33 +284,83 @@ struct MenuContentView: View {
 
     // MARK: - Footer
 
+    /// Bottom bar styled to match Vigil's footer: timestamp/last-message
+    /// on the left, terminal picker + icon-only action buttons with
+    /// tooltips on the right. Industry-standard menu-bar app footer
+    /// pattern (Tailscale, gh, op signin all use icon footers).
     @ViewBuilder
     private var footer: some View {
-        HStack(spacing: 12) {
-            terminalPicker
+        HStack(spacing: 10) {
+            Text(coordinator.lastMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
             Spacer()
-            if updateController.isConfigured {
-                Button("Check for updates") {
+
+            terminalPicker
+
+            Divider()
+                .frame(height: 14)
+                .padding(.horizontal, 2)
+
+            // Refresh status from disk + ssh -O check per host.
+            Button {
+                Task { await coordinator.refreshNow() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .help("Refresh status")
+            .disabled(coordinator.isRefreshing)
+
+            // Re-open the onboarding / setup window.
+            Button {
+                openWindow(id: "bastion.setup")
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.plain)
+            .help("Re-run setup")
+
+            // Copy diagnostics — same output as `bastion config doctor`.
+            // Useful for bug reports / support.
+            Button {
+                coordinator.copyDiagnostics()
+            } label: {
+                Image(systemName: "doc.on.clipboard")
+            }
+            .buttonStyle(.plain)
+            .help("Copy diagnostics to clipboard")
+
+            // Check for updates (Sparkle). Disabled when not configured
+            // (debug builds without the appcast URL) or when Sparkle
+            // says it's busy.
+            Button {
+                if updateController.isConfigured {
                     updateController.checkForUpdates()
                 }
-                .buttonStyle(.borderless)
-                .disabled(!updateController.canCheckForUpdates)
+            } label: {
+                Image(systemName: "arrow.down.circle")
             }
-            Button("Refresh") {
-                Task { await coordinator.refreshNow() }
+            .buttonStyle(.plain)
+            .help(updateController.isConfigured
+                  ? "Check for updates"
+                  : "Auto-updates are configured in signed release builds only")
+            .disabled(!updateController.canCheckForUpdates)
+
+            // Quit.
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power")
             }
-            .buttonStyle(.borderless)
-            .disabled(coordinator.isRefreshing)
-            Button("Re-run setup") {
-                openWindow(id: "bastion.setup")
-            }
-            .buttonStyle(.borderless)
-            Button("Quit") { NSApp.terminate(nil) }
-                .buttonStyle(.borderless)
-                .keyboardShortcut("q")
+            .buttonStyle(.plain)
+            .help("Quit Bastion (active master sockets keep running until ControlPersist expires)")
+            .keyboardShortcut("q")
         }
-        .font(.caption)
-        .padding(10)
+        .font(.system(size: 13))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
@@ -307,12 +378,14 @@ struct MenuContentView: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "macwindow")
+                    .font(.caption)
                 Text(coordinator.defaultTerminal?.displayName ?? "Pick terminal")
                     .font(.caption)
             }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .help("Terminal app used for new SSH connections")
     }
 
     private var terminalBinding: Binding<TerminalID?> {
