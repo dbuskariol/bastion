@@ -143,15 +143,6 @@ struct HostDetailCard: View {
     let onUnlock: () -> Void
     let orphanCount: Int
     let onReapOrphans: () -> Void
-    /// Legacy `%C`-style masters currently running on the old socket
-    /// path that Bastion can no longer track (because it now writes
-    /// `ControlPath ~/.ssh/sockets/bastion-<id>-%p-%r`). Surfaced as
-    /// a separate chip with a `[Move now]` button that retires the
-    /// legacy master via `ssh -O exit` so the user re-FIDOs once and
-    /// future connects multiplex through the shared-master path.
-    /// Per dual-model consensus + rubber-duck migration plan.
-    let legacyMasters: [OrphanReaper.LegacyMaster]
-    let onMoveLegacy: ([OrphanReaper.LegacyMaster]) -> Void
     @State private var copiedField: String? = nil
     @State private var confirmingDelete = false
 
@@ -233,35 +224,6 @@ struct HostDetailCard: View {
                     Button("Clean up", action: onReapOrphans)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                }
-            }
-            if !legacyMasters.isEmpty {
-                // Legacy `%C`-style master from before Bastion switched
-                // to the stable `bastion-<id>-%p-%r` path. Bastion's
-                // status code looks at the new path so this master is
-                // invisible to checkMaster() / awaitMaster() — but it's
-                // still alive and consuming an authenticated session
-                // the user paid for. Offer one-click migration: ssh -O
-                // exit retires the old master; the next connect builds
-                // a fresh one under the shared path. User re-FIDOs
-                // once, then everything is consistent.
-                Divider().padding(.vertical, 2)
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                        .foregroundStyle(.yellow)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Legacy master still running on the old socket path")
-                            .font(.caption.weight(.medium))
-                        Text("Bastion's status checks look at the new shared path. Move it now to consolidate and re-authenticate once.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Move now") {
-                        onMoveLegacy(legacyMasters)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
             }
             HStack(spacing: 8) {
