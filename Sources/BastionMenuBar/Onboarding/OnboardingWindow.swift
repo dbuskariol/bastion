@@ -43,7 +43,7 @@ final class OnboardingModel: ObservableObject {
     @Published var enableControlMasterDefault: Bool = false
     @Published var controlPersist: ControlPersistChoice = .hours(8)
     @Published var openAtLogin: Bool = false
-    @Published var enableNotifications: Bool = false
+    @Published var enableNotifications: Bool = true
     @Published var includeInstalled: Bool = false
     @Published var lastError: String?
 
