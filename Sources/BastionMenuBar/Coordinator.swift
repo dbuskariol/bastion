@@ -166,25 +166,24 @@ final class AppCoordinator: ObservableObject {
         }
 
         // FIDO migration scan: hosts where requiresInteractiveAuth is
-        // true but ControlMaster is disabled in the effective config.
-        // These will fail to connect. Surface in the one-time dialog
-        // unless the user has already acked.
+        // true but the REGISTRY-level controlMaster is not .on. The
+        // predicate is registry-based (not effective-config based)
+        // because the effective config can be temporarily OK if a stale
+        // bastion.conf wasn't re-written yet — next save would erase
+        // the ControlMaster line and break FIDO connect. We catch the
+        // at-risk state, not just the actively-broken one.
         if !fidoMigrationAcked {
-            var candidates: [HostSnapshot] = []
-            for host in report.hosts where host.requiresInteractiveAuth {
-                // `controlMaster.status == .disabled` is exactly the
-                // condition: effective `ssh -G controlmaster` is "no"
-                // or `usableControlPath` is nil. Same predicate the
-                // engine uses to short-circuit `checkMaster`.
-                if host.controlMaster.status == .disabled {
-                    candidates.append(host)
-                }
-            }
+            // Cross-reference snapshot hosts with the underlying
+            // registry (which carries `controlMaster: ControlMasterChoice`
+            // — the snapshot only has the runtime ControlMasterState).
+            let registry = (try? engine.loadRegistry())?.hosts ?? []
+            let needsMigration = Set(
+                registry
+                    .filter { $0.requiresInteractiveAuth && $0.controlMaster != .on }
+                    .map { $0.alias.lowercased() }
+            )
+            let candidates = report.hosts.filter { needsMigration.contains($0.alias.lowercased()) }
             self.fidoMigrationCandidates = candidates
-            // Only present if there's actually something to fix.
-            // Avoid re-presenting if the popover was dismissed mid-
-            // dialog — the user will see it again on next popover
-            // open. (file-truth predicate, no @State cache.)
             if !candidates.isEmpty && !fidoMigrationDialogPresented {
                 fidoMigrationDialogPresented = true
             } else if candidates.isEmpty {
