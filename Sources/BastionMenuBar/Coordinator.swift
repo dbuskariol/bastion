@@ -730,6 +730,39 @@ final class AppCoordinator: ObservableObject {
         NSPasteboard.general.setString("ssh \(alias)", forType: .string)
     }
 
+    /// Copy a `bastion doctor`-equivalent diagnostics report to the
+    /// clipboard. Mirrors Vigil's footer "copy diagnostics" affordance
+    /// so users can paste into bug reports / support tickets without
+    /// running the CLI.
+    func copyDiagnostics() {
+        let report = status
+        var lines: [String] = []
+        lines.append("=== Bastion diagnostics ===")
+        lines.append("app:         \(report.appVersion)")
+        if let v = report.sshBinaryVersion { lines.append("ssh:         \(v)") }
+        lines.append("agent:       \(report.agentReachable ? "reachable" : "unavailable")")
+        if report.oneOnePasswordAgentDetected {
+            lines.append("agent-1pwd:  yes")
+        }
+        lines.append("include:     \(report.includeInstalled ? "installed" : "MISSING")")
+        if report.iCloudSyncSuspected {
+            lines.append("icloud:      ~/.ssh appears synced across Macs")
+        }
+        lines.append("hosts:       \(report.hosts.count)")
+        for h in report.hosts {
+            let masterState = h.controlMaster.status.rawValue
+            let sessions = h.controlMaster.attachedSessions.map(String.init) ?? "—"
+            lines.append("  - \(h.alias) → \(h.hostname):\(h.port) master=\(masterState) sessions=\(sessions)")
+            if let err = h.lastError {
+                lines.append("    last error: \(err.stderrTail.prefix(120))")
+            }
+        }
+        let payload = lines.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(payload, forType: .string)
+        lastMessage = "Diagnostics copied to clipboard"
+    }
+
     func openSSHConfig() {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
