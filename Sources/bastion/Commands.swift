@@ -268,13 +268,14 @@ func runStatus(_ args: [String]) async throws -> Int32 {
 func runConfig(_ args: [String]) async throws -> Int32 {
     let flags = try CLIFlags(args)
     guard let sub = flags.positional.first else {
-        throw CLIError.missingFlag("<doctor|sync|install-include|remove-include>")
+        throw CLIError.missingFlag("<doctor|sync|install-include|remove-include|rollback>")
     }
     switch sub {
     case "doctor":
         let report = await engine.snapshot(appVersion: BastionVersion.value)
         if flags.bool("json") { try printJSON(report); return 0 }
         printDoctor(report)
+        try await printSharedMasterParity(report: report)
         return 0
     case "sync":
         let registry = try engine.loadRegistry()
@@ -291,8 +292,63 @@ func runConfig(_ args: [String]) async throws -> Int32 {
         let removed = try scanner.removeInclude()
         print(removed ? "Sentinel block removed." : "Sentinel block was not present.")
         return 0
+    case "rollback":
+        // Restore bastion.conf from its .prev counterpart (rotated on
+        // every successful save by ManagedConfigWriter). Useful escape
+        // hatch when a writer-level change (e.g. the stable-ControlPath
+        // upgrade) produces an unexpected state. Per dual-model +
+        // rubber-duck N5: ship reversibility primitives alongside any
+        // load-bearing format change.
+        try ConnectionEngine().managedWriter.rollback()
+        let prev = Paths.managedConfigPrevFile
+        let cur = Paths.managedConfigFile
+        if FileManager.default.fileExists(atPath: cur.path) {
+            print("Rolled \(cur.path) back to its previous contents.")
+        } else {
+            print("Removed \(cur.path) (no previous version to restore).")
+        }
+        print("Note: any masters established under the previous ControlPath are still alive but will not be reused by the rolled-back config. Use `bastion master stop <alias>` to retire them, or wait for ControlPersist to expire.")
+        _ = prev
+        return 0
     default:
         throw CLIError.unknown(verb: "config \(sub)")
+    }
+}
+
+/// Per dual-model consensus + rubber-duck shared-master design: verify
+/// that `ssh -G <alias>` and `ssh -G <hostname>` produce the same
+/// ControlPath for every managed host where alias != hostname. If they
+/// diverge, the Match block isn't taking effect — surface the diff so
+/// the user can fix their `~/.ssh/config` ordering or check for
+/// `CanonicalizeHostname always` surprises.
+private func printSharedMasterParity(report: StatusReport) async throws {
+    let registry = try engine.loadRegistry()
+    let reader = SSHGReader()
+    var mismatches: [(alias: String, aliasPath: String, hostnamePath: String)] = []
+    var ok = 0
+    for host in registry.hosts where host.controlMaster == .on
+        && host.hostname.lowercased() != host.alias.lowercased()
+        && !host.hostname.contains(where: { "*?!".contains($0) }) {
+        let aliasCfg = await reader.effectiveConfigWithTimeout(forAlias: host.alias, timeout: 1.0)
+        let hostCfg = await reader.effectiveConfigWithTimeout(forAlias: host.hostname, timeout: 1.0)
+        let a = aliasCfg?.first("controlpath") ?? "(none)"
+        let h = hostCfg?.first("controlpath") ?? "(none)"
+        if a == h {
+            ok += 1
+        } else {
+            mismatches.append((host.alias, a, h))
+        }
+    }
+    if ok == 0 && mismatches.isEmpty { return }
+    print("shared-master parity:")
+    if ok > 0 {
+        print("  ✓ \(ok) host(s) share one ControlMaster across alias/hostname")
+    }
+    for m in mismatches {
+        print("  ✗ \(m.alias)")
+        print("      alias     → \(m.aliasPath)")
+        print("      hostname  → \(m.hostnamePath)")
+        print("      hint: check ~/.ssh/config for earlier ControlPath-setting blocks; the Bastion Include must be first.")
     }
 }
 

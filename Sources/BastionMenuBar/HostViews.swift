@@ -143,6 +143,15 @@ struct HostDetailCard: View {
     let onUnlock: () -> Void
     let orphanCount: Int
     let onReapOrphans: () -> Void
+    /// Legacy `%C`-style masters currently running on the old socket
+    /// path that Bastion can no longer track (because it now writes
+    /// `ControlPath ~/.ssh/sockets/bastion-<id>-%p-%r`). Surfaced as
+    /// a separate chip with a `[Move now]` button that retires the
+    /// legacy master via `ssh -O exit` so the user re-FIDOs once and
+    /// future connects multiplex through the shared-master path.
+    /// Per dual-model consensus + rubber-duck migration plan.
+    let legacyMasters: [OrphanReaper.LegacyMaster]
+    let onMoveLegacy: ([OrphanReaper.LegacyMaster]) -> Void
     @State private var copiedField: String? = nil
     @State private var confirmingDelete = false
 
@@ -176,13 +185,16 @@ struct HostDetailCard: View {
                 }
                 if let socketPath = host.controlMaster.controlPath {
                     copyableRow(key: "Socket", value: socketPath)
-                    // Parity check: when Bastion wrote ControlPath=~/.ssh/sockets/%C
-                    // but the effective config resolved to something
-                    // else, the user has a global override (e.g. a
-                    // `Host *` block above the Bastion Include).
-                    // That's fine, but worth flagging so the user
-                    // knows non-Bastion clients see a different path.
-                    if !socketPath.contains("/sockets/") {
+                    // Parity check: when Bastion's writer emits
+                    // `ControlPath ~/.ssh/sockets/bastion-<id>-%p-%r`
+                    // but `ssh -G` resolves to something else, the
+                    // user's `~/.ssh/config` has an override (e.g.
+                    // a `Host *` block above Bastion's Include
+                    // setting its own ControlPath). That's fine; it
+                    // means every ssh client sees a consistent path,
+                    // it's just not OURS.
+                    let socketsPrefix = NSString(string: "~/.ssh/sockets/bastion-").expandingTildeInPath
+                    if !socketPath.hasPrefix(socketsPrefix) {
                         HStack(alignment: .top, spacing: 4) {
                             Image(systemName: "info.circle.fill")
                                 .font(.caption2)
@@ -221,6 +233,35 @@ struct HostDetailCard: View {
                     Button("Clean up", action: onReapOrphans)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                }
+            }
+            if !legacyMasters.isEmpty {
+                // Legacy `%C`-style master from before Bastion switched
+                // to the stable `bastion-<id>-%p-%r` path. Bastion's
+                // status code looks at the new path so this master is
+                // invisible to checkMaster() / awaitMaster() — but it's
+                // still alive and consuming an authenticated session
+                // the user paid for. Offer one-click migration: ssh -O
+                // exit retires the old master; the next connect builds
+                // a fresh one under the shared path. User re-FIDOs
+                // once, then everything is consistent.
+                Divider().padding(.vertical, 2)
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                        .foregroundStyle(.yellow)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Legacy master still running on the old socket path")
+                            .font(.caption.weight(.medium))
+                        Text("Bastion's status checks look at the new shared path. Move it now to consolidate and re-authenticate once.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Move now") {
+                        onMoveLegacy(legacyMasters)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
             HStack(spacing: 8) {
