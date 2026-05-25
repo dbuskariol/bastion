@@ -69,6 +69,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         setUpStatusItem()
         setUpPopover()
         autoTriggerOnboardingIfNeeded()
+        // macOS 13's SwiftUI `Window` scene auto-opens at app launch
+        // when LSUIElement=true and there are no other visible scenes
+        // (we replaced MenuBarExtra with an AppKit-level NSStatusItem
+        // that SwiftUI can't see). There is NO documented opt-out
+        // before macOS 15's `defaultLaunchBehavior(.suppressed)`. So
+        // we close any auto-opened Setup / Host-editor windows right
+        // after launch unless the user / AppDelegate explicitly
+        // requested they be open.
+        //
+        // Vigil's equivalent: an `@Published shouldShowWindow` flag
+        // observed by `.onChange` that calls `window.close()`. Same
+        // idea, different cut.
+        DispatchQueue.main.async { [weak self] in
+            self?.closeAutoOpenedWindows()
+        }
+    }
+
+    /// Close any SwiftUI `Window` scene windows that SwiftUI auto-
+    /// opened at app launch but no caller actually requested. Run
+    /// once on the next runloop tick after `applicationDidFinishLaunching`
+    /// so the system has finished its window-creation pass.
+    private func closeAutoOpenedWindows() {
+        for window in NSApp.windows {
+            let id = window.identifier?.rawValue ?? ""
+            let title = window.title
+            let isSetup = id.contains("bastion.setup") || title == "Bastion Setup"
+            let isEditor = id.contains("bastion.host-editor") || title == "Host"
+            if isSetup || isEditor {
+                Self.log.info("closing auto-opened window: id=\(id, privacy: .public) title=\(title, privacy: .public)")
+                window.close()
+            }
+        }
     }
 
     // MARK: - Status item
