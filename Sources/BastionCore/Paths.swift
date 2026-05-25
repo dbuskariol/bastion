@@ -120,4 +120,30 @@ public enum Paths {
             withIntermediateDirectories: true
         )
     }
+
+    /// Ensure `~/.ssh/sockets/` exists with 0700 perms. Called whenever
+    /// we either (a) write bastion.conf (which references this dir) or
+    /// (b) are about to spawn an ssh process for one of our managed
+    /// hosts. OpenSSH does NOT create parent dirs for `ControlPath`, so
+    /// without this the master daemon silently fails to bind the socket
+    /// after a successful FIDO/password auth — visible to the user as
+    /// "stuck at authenticating" because checkMaster keeps reporting
+    /// `.down` until the awaitMaster 180s timeout fires.
+    ///
+    /// Idempotent: creates only if missing, sets 0700 always.
+    public static func ensureSocketsDirectoryExists() throws {
+        let url = sshSocketsDirectory
+        try FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [FileAttributeKey.posixPermissions: 0o700]
+        )
+        // Re-assert perms (createDirectory honors the attributes only on
+        // creation; an existing dir with the wrong mode would silently
+        // leak the socket to other local UIDs).
+        try? FileManager.default.setAttributes(
+            [FileAttributeKey.posixPermissions: 0o700],
+            ofItemAtPath: url.path
+        )
+    }
 }
