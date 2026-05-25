@@ -38,6 +38,20 @@ public struct TerminalAppLauncher: TerminalLauncher {
 }
 
 /// AppleScript-based launcher for iTerm2.
+///
+/// We deliberately do NOT pass the ssh command via iTerm's `command`
+/// parameter to `create tab/window`. That bypasses the user's shell —
+/// when ssh exits (cleanly daemonizing -fNM, or failing during connect)
+/// the tab either auto-closes or sits blank, with no shell prompt and
+/// no error visible to the user. We saw this exact failure mode on
+/// FIDO hosts whose second-hop auth failed: the user only saw an empty
+/// iTerm tab and had no idea what went wrong.
+///
+/// Instead, we let iTerm spawn the user's default profile (their shell),
+/// then `write text` the ssh command in as typed input. iTerm queues
+/// the text until the shell is ready, so no race. After ssh exits the
+/// user sees the exit status + shell prompt and can ^C to abort or
+/// re-run as needed.
 public struct ITerm2Launcher: TerminalLauncher {
     public let id: TerminalID = .iterm2
     public let recorder: TerminalLaunchRecorder?
@@ -51,7 +65,10 @@ public struct ITerm2Launcher: TerminalLauncher {
             script = """
             tell application "iTerm"
                 activate
-                create window with default profile command \(escaped)
+                set newWindow to (create window with default profile)
+                tell current session of newWindow
+                    write text \(escaped)
+                end tell
             end tell
             """
         } else {
@@ -59,9 +76,17 @@ public struct ITerm2Launcher: TerminalLauncher {
             tell application "iTerm"
                 activate
                 if (count of windows) > 0 then
-                    tell current window to create tab with default profile command \(escaped)
+                    tell current window
+                        set newTab to (create tab with default profile)
+                        tell current session of newTab
+                            write text \(escaped)
+                        end tell
+                    end tell
                 else
-                    create window with default profile command \(escaped)
+                    set newWindow to (create window with default profile)
+                    tell current session of newWindow
+                        write text \(escaped)
+                    end tell
                 end if
             end tell
             """
