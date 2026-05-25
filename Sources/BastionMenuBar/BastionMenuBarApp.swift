@@ -25,16 +25,19 @@ struct BastionMenuBarApp: App {
                 .environmentObject(coordinator)
                 .environmentObject(updateController)
         } label: {
-            // Read only the derived `menuBarBadge` here — NEVER
-            // `coordinator.status` directly. Otherwise the App scene
-            // re-renders on every refresh and the MenuBarExtra
-            // popover's hosting view never re-arms its content
-            // observation.
-            MenuBarLabel(
-                anyMasterAlive: coordinator.menuBarBadge.anyMasterAlive,
-                anyWarning: coordinator.menuBarBadge.anyWarning
-            )
-            .background(OnboardingTrigger(coordinator: coordinator, hasShown: $onboardingHasShown))
+            // CRITICAL: do NOT read any `coordinator.@Published` directly
+            // in this closure. Wrap the badge consumption in a child
+            // view (`MenuBarLabelBadge`) that does the observation
+            // internally. Reading `coordinator.menuBarBadge.X` here
+            // re-evaluates the App scene on every badge change, which
+            // tears down the popover's hosting NSPanel and breaks its
+            // observation chain — visible to the user as "popover shows
+            // stale state forever after the first poll-induced badge
+            // transition". Same root cause as why we don't read
+            // `coordinator.status` here. Diagnosed via dual-model
+            // consensus + rubber-duck, second pass.
+            MenuBarLabelBadge(coordinator: coordinator)
+                .background(OnboardingTrigger(coordinator: coordinator, hasShown: $onboardingHasShown))
         }
         .menuBarExtraStyle(.window)
 
@@ -66,8 +69,16 @@ struct BastionMenuBarApp: App {
 /// every time SwiftUI recreates the trigger view (which happens whenever
 /// the menu-bar label re-renders), which was the bug source: every host
 /// add caused the wizard to re-fire.
+///
+/// Coordinator is passed as a plain `let`, NOT `@ObservedObject`. We
+/// only consult it inside `onAppear` (one-shot action, not observation)
+/// — observing here would cause this view to re-render on every poll
+/// refresh, which cascades into App-scene re-evaluation and tears down
+/// the popover hosting view's observation chain. The popover then
+/// shows stale state forever. Diagnosed via dual-model consensus +
+/// rubber-duck, second pass.
 private struct OnboardingTrigger: View {
-    @ObservedObject var coordinator: AppCoordinator
+    let coordinator: AppCoordinator
     @Binding var hasShown: Bool
     @Environment(\.openWindow) private var openWindow
 
@@ -94,6 +105,28 @@ private struct OnboardingTrigger: View {
                     }
                 }
             }
+    }
+}
+
+/// Wrapper around `MenuBarLabel` that owns the @ObservedObject
+/// subscription to the coordinator. This view re-renders on every
+/// `menuBarBadge` change — which is fine because it's a leaf view
+/// (`Image` + overlay) — but crucially the SUBSCRIPTION lives here
+/// instead of in the App scene's label closure. Reading
+/// `coordinator.menuBarBadge.X` at the App-scene scope re-evaluates
+/// the App body on every badge change, which tears down the
+/// MenuBarExtra(.window) popover's hosting NSPanel and breaks its
+/// observation of `coordinator.status.hosts`. Visible to the user as
+/// a popover that shows the empty initial state forever after the
+/// first poll-induced badge transition (e.g. masters come up after
+/// the user's first FIDO touch since launch).
+private struct MenuBarLabelBadge: View {
+    @ObservedObject var coordinator: AppCoordinator
+    var body: some View {
+        MenuBarLabel(
+            anyMasterAlive: coordinator.menuBarBadge.anyMasterAlive,
+            anyWarning: coordinator.menuBarBadge.anyWarning
+        )
     }
 }
 
