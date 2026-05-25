@@ -7,6 +7,7 @@ import BastionIdentifiers
 /// each category in Preferences; each category is opt-in default-off.
 public enum NotificationCategory: String, Sendable, CaseIterable {
     case masterDropped       = "bastion.master-dropped"
+    case masterReady         = "bastion.master-ready"
     case persistExpired      = "bastion.persist-expired"
     case keepaliveFailure    = "bastion.keepalive-failure"
     case agentForgotKey      = "bastion.agent-forgot-key"
@@ -15,7 +16,8 @@ public enum NotificationCategory: String, Sendable, CaseIterable {
 
     public var displayTitle: String {
         switch self {
-        case .masterDropped:       return "ControlMaster dropped"
+        case .masterDropped:       return "Authentication expired"
+        case .masterReady:         return "Authenticated"
         case .persistExpired:      return "ControlPersist expired"
         case .keepaliveFailure:    return "Connection unresponsive"
         case .agentForgotKey:      return "Keychain locked"

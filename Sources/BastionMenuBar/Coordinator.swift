@@ -138,10 +138,29 @@ final class AppCoordinator: ObservableObject {
             anyMasterAlive: report.hosts.contains { $0.controlMaster.status == .running },
             anyWarning: report.iCloudSyncSuspected || !report.includeInstalled
         )
+        // Detect host-set changes between refreshes. Bump menuRevision
+        // so the popover's `.id(menuRevision)` remount kicks in and
+        // SwiftUI rebuilds the host-list subtree — needed because the
+        // macOS 13 MenuBarExtra(.window) hosting view materialises ONCE
+        // at first popover-open and can keep stale `coordinator.status`
+        // (empty at init) even after @Published updates fire. Catches:
+        //   - first refresh after app launch (was empty → now N hosts)
+        //   - hosts added/removed via the CLI while the app is running
+        //   - sync via `bastion config sync` etc.
+        // No bump for transient state-only changes (e.g. master alive ↔
+        // dead) — those rely on @Published of `controlMaster.status`
+        // inside the HostRow subview, which works fine on macOS 13.
+        let oldAliases = Set(status.hosts.map { $0.alias.lowercased() })
+        let newAliases = Set(report.hosts.map { $0.alias.lowercased() })
+        let hostSetChanged = oldAliases != newAliases
+
         self.status = report
         self.lastMessage = "Updated \(Self.timeFormatter.string(from: report.generatedAt))"
         if newBadge != self.menuBarBadge {
             self.menuBarBadge = newBadge
+        }
+        if hostSetChanged {
+            menuRevision &+= 1
         }
 
         // Refresh orphan detection. Only scan for hosts whose master is
@@ -378,9 +397,9 @@ final class AppCoordinator: ObservableObject {
                 return "\(m) minute\(m == 1 ? "" : "s")"
             }()
             await NotificationDispatcher.shared.post(
-                category: .masterDropped,
+                category: .masterReady,
                 host: alias,
-                body: "Authenticated. Connects will be instant for \(persistLabel)."
+                body: "Connects will be instant for \(persistLabel)."
             )
         }
     }
@@ -584,7 +603,7 @@ final class AppCoordinator: ObservableObject {
                 // notification on top of this richer one.
                 notifiedAt[alias] = Date()
                 await NotificationDispatcher.shared.post(
-                    category: .masterDropped,
+                    category: .masterReady,
                     host: alias,
                     body: "Authentication complete. Opening shell…"
                 )
@@ -649,8 +668,8 @@ final class AppCoordinator: ObservableObject {
             let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
             notifiedAt[alias] = Date()
             await NotificationDispatcher.shared.post(
-                category: .masterDropped, host: alias,
-                body: "Authenticated. Connects will be instant for \(persistLabel)."
+                category: .masterReady, host: alias,
+                body: "Connects will be instant for \(persistLabel)."
             )
             await refreshNow()
             return
@@ -673,8 +692,8 @@ final class AppCoordinator: ObservableObject {
             let persistLabel = host.map { Self.formatPersist($0.controlPersist) } ?? "the persist window"
             notifiedAt[alias] = Date()
             await NotificationDispatcher.shared.post(
-                category: .masterDropped, host: alias,
-                body: "Authenticated. Connects will be instant for \(persistLabel)."
+                category: .masterReady, host: alias,
+                body: "Connects will be instant for \(persistLabel)."
             )
             await refreshNow()
         case .timeout:
