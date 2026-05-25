@@ -54,6 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.log.info("applicationDidFinishLaunching")
+        // Belt-and-suspenders against macOS state restoration. The
+        // SwiftUI Window scenes have `NonRestorableWindow` applied at
+        // the per-window level, but registering this default flips off
+        // the "Reopen windows when logging back in" behavior at the
+        // app level too. Without it, the Setup window would re-open
+        // on every launch even after the user completed onboarding,
+        // because macOS persists window frames under `NSWindow Frame
+        // <id>` and the system's window-restoration pass tries to
+        // recreate them.
+        UserDefaults.standard.register(defaults: [
+            "NSQuitAlwaysKeepsWindows": false
+        ])
         setUpStatusItem()
         setUpPopover()
         autoTriggerOnboardingIfNeeded()

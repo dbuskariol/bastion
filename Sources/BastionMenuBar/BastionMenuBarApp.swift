@@ -18,6 +18,15 @@ struct BastionMenuBarApp: App {
     var body: some Scene {
         // Setup window — auto-opened on first launch by AppDelegate
         // via NotificationCenter, manually re-openable via the popover.
+        //
+        // `NonRestorableWindow` marks the underlying NSWindow as
+        // `isRestorable = false` so macOS does NOT auto-open this
+        // window on every app launch (which it would otherwise do
+        // because SwiftUI Window scenes have restoration enabled by
+        // default and the system persists their frame in UserDefaults
+        // under `NSWindow Frame <id>`). Without this, users with
+        // hosts already configured see the Setup wizard pop up every
+        // single launch.
         Window("Bastion Setup", id: "bastion.setup") {
             OnboardingWindow(coordinator: appDelegate.coordinator) {
                 UserDefaults.standard.set(true, forKey: "bastion.onboarding.shown")
@@ -25,6 +34,7 @@ struct BastionMenuBarApp: App {
             }
             .environmentObject(appDelegate.coordinator)
             .background(OpenWindowBridge())
+            .background(NonRestorableWindow())
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
@@ -35,10 +45,31 @@ struct BastionMenuBarApp: App {
         Window("Host", id: "bastion.host-editor") {
             HostEditorWindow()
                 .environmentObject(appDelegate.coordinator)
+                .background(NonRestorableWindow())
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
     }
+}
+
+/// Marks the host SwiftUI `Window`'s underlying NSWindow as
+/// non-restorable so macOS doesn't auto-reopen it on every launch.
+/// SwiftUI Window scenes have `isRestorable = true` by default; on
+/// app relaunch macOS reads the saved frame (key
+/// `NSWindow Frame <id>` in UserDefaults) and re-opens any window
+/// that was open at quit-time. For our Setup and Host-editor windows
+/// we want them to open ONLY when the user explicitly invokes them
+/// (the popover's gear button) or when AppDelegate decides
+/// onboarding is needed.
+private struct NonRestorableWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            view.window?.isRestorable = false
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 /// Invisible bridge between AppDelegate's onboarding-trigger
