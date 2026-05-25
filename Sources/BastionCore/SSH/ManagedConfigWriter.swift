@@ -90,6 +90,35 @@ public struct ManagedConfigWriter {
                 try rollback()
                 throw sshError
             }
+            // Per dual-model consensus: when alias != hostname, ALSO
+            // resolve `ssh -G <hostname>` and assert it yields the same
+            // ControlPath. This is the load-bearing assertion that the
+            // shared-master design actually shares — the `Match host`
+            // block must take effect for the FQDN-typed path. If the
+            // pattern was silently dropped (e.g. hostname looked like
+            // a glob and our writer skipped the Match block, or the
+            // user had `CanonicalizeHostname always` that broke our
+            // matching), throw. Per rubber-duck on shared-master design.
+            if host.hostname.lowercased() != host.alias.lowercased(),
+               host.controlMaster.configValue != nil,
+               !host.hostname.contains(where: { "*?!".contains($0) }) {
+                do {
+                    let aliasCfg = try await reader.effectiveConfig(forAlias: host.alias, configFile: isolationFile)
+                    let hostCfg = try await reader.effectiveConfig(forAlias: host.hostname, configFile: isolationFile)
+                    let aliasPath = aliasCfg.first("controlpath")
+                    let hostPath = hostCfg.first("controlpath")
+                    if aliasPath != hostPath {
+                        try rollback()
+                        throw SSHConfigError.invalidValue(
+                            option: "controlpath",
+                            reason: "alias '\(host.alias)' and hostname '\(host.hostname)' resolve to different ControlPaths in the rendered bastion.conf — the Match host block did not take effect. alias='\(aliasPath ?? "nil")', hostname='\(hostPath ?? "nil")'. This is a writer bug; please file an issue."
+                        )
+                    }
+                } catch let sshError as SSHConfigError {
+                    try rollback()
+                    throw sshError
+                }
+            }
         }
         result.isolationPassed = true
 
@@ -115,6 +144,21 @@ public struct ManagedConfigWriter {
                 let got = effective.first(key)
                 if normalise(got) != normalise(want) {
                     mismatches[key] = "expected=\(want.debugDescription) got=\(got?.debugDescription ?? "nil")"
+                }
+            }
+            // ControlPath integration check — per rubber-duck B3, `ssh
+            // -G` emits the path with `%p` / `%r` already expanded to
+            // runtime values (verified empirically:
+            //   $ ssh -G -o 'ControlPath=~/.ssh/sockets/test-%p-%r' -F /dev/null somehost
+            //   controlpath /Users/alice/.ssh/sockets/test-22-alice
+            // ), so literal string comparison against our writer's
+            // `~/.ssh/sockets/bastion-<id>-%p-%r` would throw on every
+            // save. Compare with a regex instead.
+            if host.controlMaster.configValue != nil {
+                let pattern = expectedControlPathPattern(for: host)
+                let got = effective.first("controlpath") ?? ""
+                if got.range(of: pattern, options: .regularExpression) == nil {
+                    mismatches["controlpath"] = "expected matching \(pattern.debugDescription) got=\(got.debugDescription)"
                 }
             }
             if !mismatches.isEmpty {
@@ -183,6 +227,27 @@ public struct ManagedConfigWriter {
         guard rename(temp.path, target.path) == 0 else {
             throw SSHConfigError.io("rename failed: \(String(cString: strerror(errno)))")
         }
+    }
+
+    /// Regex matching the literal ControlPath we expect `ssh -G alias`
+    /// to emit after `%p` and `%r` expansion. Per rubber-duck B3 — we
+    /// cannot string-compare because `ssh -G` substitutes tokens at
+    /// probe time.
+    ///
+    /// Anchored, with the home directory and 12-hex mux id baked in
+    /// literally and the port/user segments as `\d+` / `[^/]+`. The
+    /// user segment is left as `[^/]+` rather than the resolved user
+    /// value because integration validation runs as the local process
+    /// user, which may differ from the host's configured remote user
+    /// (and from any future SSH invocation's `-l otheruser`). The
+    /// segmentation is provided by the `Match host` block routing the
+    /// right invocation to this stanza; the regex just verifies
+    /// Bastion's writer + Match emission landed.
+    private func expectedControlPathPattern(for host: ManagedHost) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let prefix = home + "/.ssh/sockets/bastion-\(host.resolvedControlMuxID)-"
+        let escaped = NSRegularExpression.escapedPattern(for: prefix)
+        return "^" + escaped + #"\d+-[^/]+$"#
     }
 
     /// The set of (key, value) pairs we expect `ssh -G alias` to report

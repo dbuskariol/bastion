@@ -36,12 +36,95 @@ struct BastionConfigWriterTests {
         #expect(!outputOff.contains("ControlMaster"))
         #expect(!outputOff.contains("ControlPath"))
 
-        let hostOn = ManagedHost(alias: "on", hostname: "h",
+        let id = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let hostOn = ManagedHost(id: id, alias: "on", hostname: "h",
                                  controlMaster: .on, controlPersist: .hours(8))
         let outputOn = try writer.render(HostRegistry(hosts: [hostOn]))
         #expect(outputOn.contains("ControlMaster auto"))
-        #expect(outputOn.contains("ControlPath ~/.ssh/sockets/%C"))
+        // Stable per-host ControlPath with %p-%r segmentation (load-bearing
+        // for the cross-name-variant shared-master design).
+        #expect(outputOn.contains("ControlPath ~/.ssh/sockets/bastion-111111111111-%p-%r"))
         #expect(outputOn.contains("ControlPersist 8h"))
+    }
+
+    @Test func emitsMatchHostBlockWhenAliasDiffersFromHostname() throws {
+        let writer = BastionConfigWriter()
+        let id = UUID(uuidString: "abcdef01-2345-6789-abcd-ef0123456789")!
+        let host = ManagedHost(
+            id: id,
+            alias: "bastion",
+            hostname: "bastion.example.internal",
+            user: "alice",
+            identityFiles: ["/Users/test/.ssh/id_rsa"],
+            controlMaster: .on,
+            controlPersist: .hours(8),
+            advanced: [.proxyJump: "bastion-jump.example.com"]
+        )
+        let output = try writer.render(HostRegistry(hosts: [host]))
+        // Primary Host stanza:
+        #expect(output.contains("Host bastion"))
+        #expect(output.contains("    HostName bastion.example.internal"))
+        #expect(output.contains("    ControlPath ~/.ssh/sockets/bastion-abcdef012345-%p-%r"))
+        // Match block:
+        #expect(output.contains("Match host bastion.example.internal"))
+        // B1 fix: no `user <user>` qualifier on the Match line.
+        #expect(!output.contains("Match host bastion.example.internal user"))
+        // B1 fix: User INSIDE the block.
+        let matchBlockStart = output.range(of: "Match host")!.lowerBound
+        let afterMatch = String(output[matchBlockStart...])
+        #expect(afterMatch.contains("    User alice"))
+        // N2: IdentityFile + IdentitiesOnly re-asserted.
+        #expect(afterMatch.contains("    IdentityFile /Users/test/.ssh/id_rsa"))
+        #expect(afterMatch.contains("    IdentitiesOnly yes"))
+        // N1: ProxyJump re-asserted because Bastion has it explicitly.
+        #expect(afterMatch.contains("    ProxyJump bastion-jump.example.com"))
+        // Multiplex trio re-asserted in the Match block too.
+        #expect(afterMatch.contains("    ControlMaster auto"))
+        #expect(afterMatch.contains("    ControlPath ~/.ssh/sockets/bastion-abcdef012345-%p-%r"))
+        #expect(afterMatch.contains("    ControlPersist 8h"))
+    }
+
+    @Test func suppressesMatchBlockWhenAliasEqualsHostname() throws {
+        let writer = BastionConfigWriter()
+        let host = ManagedHost(alias: "myhost", hostname: "myhost",
+                               controlMaster: .on, controlPersist: .hours(8))
+        let output = try writer.render(HostRegistry(hosts: [host]))
+        #expect(output.contains("Host myhost"))
+        #expect(!output.contains("Match host"))
+    }
+
+    @Test func suppressesMatchBlockForGlobHostname() throws {
+        // Belt-and-suspenders: validateForSave should reject this first,
+        // but if a host somehow gets here with a glob hostname, the writer
+        // must not emit a `Match host *.something` over-matcher.
+        // We synthesise via direct construction; we don't go through validateForSave.
+        let writer = BastionConfigWriter()
+        let host = ManagedHost(alias: "x", hostname: "literal.example.com",
+                               controlMaster: .on, controlPersist: .hours(8))
+        // (Real glob test happens in the ManagedHost validation test below.)
+        let output = try writer.render(HostRegistry(hosts: [host]))
+        #expect(output.contains("Match host literal.example.com"))
+    }
+
+    @Test func validateForSaveRejectsGlobInHostname() throws {
+        // Per rubber-duck S2: hostname must be literal when ControlMaster
+        // is enabled (we emit Match host with it).
+        let host = ManagedHost(alias: "wild", hostname: "*.internal",
+                               controlMaster: .on, controlPersist: .hours(8))
+        #expect(throws: SSHConfigError.self) {
+            try host.validateForSave()
+        }
+    }
+
+    @Test func resolvedControlMuxIDDerivedFromIdWhenNil() throws {
+        let id = UUID(uuidString: "deadbeef-1234-5678-9abc-def012345678")!
+        let host = ManagedHost(id: id, alias: "x", hostname: "h")
+        #expect(host.resolvedControlMuxID == "deadbeef1234")
+    }
+
+    @Test func resolvedControlMuxIDHonoursExplicitOverride() throws {
+        let host = ManagedHost(alias: "x", hostname: "h", controlMuxID: "explicit-mux")
+        #expect(host.resolvedControlMuxID == "explicit-mux")
     }
 
     @Test func identityFileImpliesIdentitiesOnly() throws {

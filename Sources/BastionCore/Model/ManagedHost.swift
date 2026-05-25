@@ -98,6 +98,23 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
     /// ControlPersist window are instant.
     public var requiresInteractiveAuth: Bool
 
+    /// Stable, Bastion-owned identifier embedded in the master-socket
+    /// path. Default = first 12 hex of `id.uuidString` lowercased. Per
+    /// dual-model consensus + rubber-duck N3: 12 hex = 48 bits → for
+    /// the 100-host scale Bastion targets, p(collision) ≈ 3×10⁻¹² vs
+    /// ~10⁻⁶ at 8 hex. Same path-length budget either way (the runtime
+    /// path is `~/.ssh/sockets/bastion-<12hex>-<port>-<user>` ≈ 60+home).
+    ///
+    /// Decoupled from `host.id` so we can regenerate on corruption /
+    /// future shared-mux groups without touching the identity field
+    /// (which is referenced by stats events, UI selection, the `# id:`
+    /// comment in bastion.conf, and external-reference promises).
+    ///
+    /// Optional: nil means "derive from id at writer time"; explicit
+    /// value wins. Mutated only by future migration tools, never by
+    /// the editor.
+    public var controlMuxID: String?
+
     public init(
         id: UUID = UUID(),
         alias: String,
@@ -113,7 +130,8 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         notes: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        requiresInteractiveAuth: Bool = false
+        requiresInteractiveAuth: Bool = false,
+        controlMuxID: String? = nil
     ) {
         self.id = id
         self.alias = alias
@@ -130,14 +148,28 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.requiresInteractiveAuth = requiresInteractiveAuth
+        self.controlMuxID = controlMuxID
     }
 
-    // Custom decoder so adding `requiresInteractiveAuth` doesn't break
-    // hosts.json files written before the field existed (default = false).
+    /// Resolved per-host mux identifier embedded in `~/.ssh/sockets/bastion-<id>-%p-%r`.
+    /// Returns the persisted `controlMuxID` if set, otherwise derives from `host.id`.
+    /// Always lowercase hex, 12 chars (48 bits). Single source of truth used by the
+    /// writer, integration validation, and any UI surface that needs the path prefix.
+    public var resolvedControlMuxID: String {
+        if let muxID = controlMuxID, !muxID.isEmpty {
+            return muxID
+        }
+        return String(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased()
+    }
+
+    // Custom decoder so adding `requiresInteractiveAuth` and
+    // `controlMuxID` doesn't break hosts.json files written before
+    // those fields existed.
     private enum CodingKeys: String, CodingKey {
         case id, alias, hostname, user, port, identityFiles
         case controlMaster, controlPersist, advanced, rawConfigOverride
         case tags, notes, createdAt, updatedAt, requiresInteractiveAuth
+        case controlMuxID
     }
 
     public init(from decoder: Decoder) throws {
@@ -157,12 +189,13 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
         self.createdAt = try c.decode(Date.self, forKey: .createdAt)
         self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
         self.requiresInteractiveAuth = try c.decodeIfPresent(Bool.self, forKey: .requiresInteractiveAuth) ?? false
+        self.controlMuxID = try c.decodeIfPresent(String.self, forKey: .controlMuxID)
     }
 
     /// Model-layer save invariants. Called from `ConnectionEngine.upsertHost`
     /// so both the editor and the CLI hit the same enforcement.
     ///
-    /// Two rules so far, both load-bearing for the FIDO/SSO bootstrap flow:
+    /// Rules:
     ///
     /// 1. FIDO hosts MUST have `controlMaster == .on`. A FIDO host with
     ///    `.off` is silently broken (we write `ControlMaster no` so the
@@ -174,8 +207,17 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
     ///    `ssh -G` probe handles the `.inherit` case with a richer
     ///    error. From the CLI we apply the stricter rule (`.on` only).
     /// 2. The resolved ControlPath length must fit Darwin's Unix-socket
-    ///    cap (104 chars). Our managed path expands `%C` to a 40-char
-    ///    SHA1 hash; we conservatively cap the prefix.
+    ///    cap (104 chars). Our managed path is
+    ///    `~/.ssh/sockets/bastion-<12hex>-<port>-<user>` where `<port>`
+    ///    is up to 5 digits and `<user>` is bounded by the POSIX
+    ///    `_POSIX_LOGIN_NAME_MAX` of 9 in theory but realistically 32
+    ///    on macOS (`sysconf(_SC_LOGIN_NAME_MAX)`).
+    /// 3. Hostname must not contain shell-glob metacharacters when
+    ///    `controlMaster` is enabled — we emit `Match host <hostname>`
+    ///    blocks (per the dual-model + rubber-duck design for shared
+    ///    masters across alias/hostname variants), and `Match host`
+    ///    pattern-matches its argument. A literal `*.internal` would
+    ///    over-match catastrophically. Per rubber-duck S2.
     public func validateForSave() throws {
         if requiresInteractiveAuth && controlMaster == .off {
             throw SSHConfigError.invalidValue(
@@ -183,18 +225,31 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
                 reason: "FIDO/SSO hosts require ControlMaster=On — otherwise every command would prompt for a FIDO touch. Change ControlMaster to On in the editor."
             )
         }
-        // ~/.ssh/sockets/<40-hex-hash> = roughly 60 chars on a typical
-        // /Users/<short>/ install. Long-username corporate accounts
-        // (/Users/firstname.middlename.lastname/) clip 90+. The Darwin
-        // cap is 104. Reject paths likely to exceed it at save time
-        // rather than at bind time with an opaque error.
+        if controlMaster != .off,
+           hostname.contains(where: { "*?!".contains($0) }) {
+            throw SSHConfigError.invalidValue(
+                option: "hostname",
+                reason: "Hostname must be a literal hostname, not a glob pattern (contains one of `*`, `?`, `!`). Bastion emits a `Match host <hostname>` block to share ControlMaster across typed variants of the same host; a glob there would over-match other hosts."
+            )
+        }
+        // ~/.ssh/sockets/bastion-<12hex>-<port>-<user>:
+        //   "bastion-" = 8
+        //   12hex      = 12
+        //   "-"        = 1
+        //   port       = up to 5
+        //   "-"        = 1
+        //   user       = bounded by POSIX login name max; budget 32
+        //   Total      = 8 + 12 + 1 + 5 + 1 + 32 = 59 chars after
+        //               "~/.ssh/sockets/" (= 15) → 74 chars after $HOME.
+        // The Darwin sun_path cap is 104. Long-username corporate
+        // home dirs (/Users/firstname.middlename.lastname/) can clip 90+.
         let homeLen = FileManager.default.homeDirectoryForCurrentUser.path.count
         let socketPrefix = homeLen + "/.ssh/sockets/".count
-        let estimatedPathLen = socketPrefix + 40
+        let estimatedPathLen = socketPrefix + 59
         if controlMaster == .on && estimatedPathLen > 100 {
             throw SSHConfigError.invalidValue(
                 option: "controlPath",
-                reason: "Your home directory path is too long for Bastion's default ControlPath (would exceed the 104-character Unix socket limit). Workaround: set a shorter ControlPath in the Raw tab, e.g. `ControlPath /tmp/sshmux/%C`, after manually creating /tmp/sshmux."
+                reason: "Your home directory path is too long for Bastion's default ControlPath (would exceed the 104-character Unix socket limit). Workaround: set a shorter ControlPath in the Raw tab, e.g. `ControlPath /tmp/sshmux/bastion-<id>-%p-%r`, after manually creating /tmp/sshmux."
             )
         }
     }

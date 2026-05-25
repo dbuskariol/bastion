@@ -44,7 +44,7 @@ public struct BastionConfigWriter {
         lines.append("Host \(host.alias)")
         // Stable comment so we can attribute lines back to the registry id.
         lines.append("    # id: \(host.id.uuidString)")
-        lines.append("    \(SSHOption.identityFile.configKey == "IdentityFile" ? "HostName" : "HostName") \(try checked(host.hostname))")
+        lines.append("    HostName \(try checked(host.hostname))")
         if let user = host.user, !user.isEmpty {
             lines.append("    User \(try checked(user))")
         }
@@ -63,22 +63,19 @@ public struct BastionConfigWriter {
             lines.append("    IdentitiesOnly yes")
         }
 
+        let effectivePersist = resolvedPersist(for: host)
+
         if let value = host.controlMaster.configValue {
             lines.append("    \(SSHOption.controlMaster.configKey) \(value)")
-            // ControlPath always points to the consensus default; users
-            // can override via Raw if they really need a custom path.
-            lines.append("    \(SSHOption.controlPath.configKey) ~/.ssh/sockets/%C")
+            // Stable per-host ControlPath. The `-%p-%r` tokens are
+            // load-bearing for security: OpenSSH does NOT validate
+            // (user, host, port) against an existing master before
+            // mux-attaching; the socket *name* is the segmentation
+            // primitive. Without `-%r`, `ssh otheruser@host` could
+            // attach to a master authenticated as a different user.
+            // Per dual-model consensus + rubber-duck B1/B3.
+            lines.append("    \(SSHOption.controlPath.configKey) \(controlPath(for: host))")
         }
-        // ControlPersist: if user picked Inherit but ControlMaster is .on,
-        // upgrade silently to the default (.hours(8)). An On-master with
-        // no persist is just an in-session master that dies with the
-        // shell — which defeats the entire "unlock for the day" UX.
-        let effectivePersist: ControlPersistChoice = {
-            if case .inherit = host.controlPersist, host.controlMaster == .on {
-                return .defaultChoice
-            }
-            return host.controlPersist
-        }()
         if let value = effectivePersist.configValue {
             lines.append("    \(SSHOption.controlPersist.configKey) \(value)")
         }
@@ -116,7 +113,105 @@ public struct BastionConfigWriter {
                 lines.append("    \(rawLine)")
             }
         }
+
+        // Per dual-model consensus + rubber-duck pass: emit a parallel
+        // `Match host <hostname>` block so connections typed as the
+        // full hostname (`ssh bastion.example.internal`,
+        // VS Code Remote-SSH using the full name, git remotes using
+        // the full name, …) share Bastion's master with the alias-typed
+        // form (`ssh bastion`). The Match block re-asserts the
+        // multiplex directives + identity directives + Bastion-managed
+        // proxy directives. See `matchBlockLines` for the rubber-duck
+        // findings driving each re-assertion.
+        if shouldEmitMatchBlock(for: host) {
+            lines.append("")
+            lines.append(contentsOf: matchBlockLines(for: host, effectivePersist: effectivePersist))
+        }
         return lines
+    }
+
+    /// True when the host has an FQDN distinct from its alias and the
+    /// hostname is a literal (not a glob). `validateForSave` already
+    /// rejects glob hostnames when ControlMaster is on; this is the
+    /// belt-and-suspenders check.
+    private func shouldEmitMatchBlock(for host: ManagedHost) -> Bool {
+        guard host.controlMaster.configValue != nil else { return false }
+        guard host.hostname.lowercased() != host.alias.lowercased() else { return false }
+        guard !host.hostname.contains(where: { "*?!".contains($0) }) else { return false }
+        return true
+    }
+
+    /// `Match host <hostname>` block emitted alongside the primary
+    /// `Host <alias>` stanza so plain `ssh <hostname>` reuses the same
+    /// master as `ssh <alias>`.
+    ///
+    /// Rubber-duck findings adopted:
+    ///   B1: NO `user <user>` qualifier on the Match line — that filter
+    ///       silently fails when local user ≠ configured user and the
+    ///       Host block didn't fire (FQDN-typed case). Instead, put
+    ///       `User <user>` INSIDE the block. The `-%r` token in
+    ///       ControlPath already provides per-user socket isolation.
+    ///   N1: Re-assert ProxyJump/ProxyCommand ONLY when Bastion is the
+    ///       source of truth (explicitly set in `host.advanced`). When
+    ///       inherited from a user wildcard, omit so the wildcard wins
+    ///       for the FQDN-typed path (no silent override of e.g. their
+    ///       regional ProxyJump).
+    ///   N2: Re-assert IdentityFile + IdentitiesOnly so direct-FQDN
+    ///       typing doesn't trip MaxAuthTries when the agent has many
+    ///       keys loaded.
+    private func matchBlockLines(
+        for host: ManagedHost,
+        effectivePersist: ControlPersistChoice
+    ) -> [String] {
+        var lines: [String] = []
+        lines.append("Match host \(host.hostname)")
+        lines.append("    # Bastion id: \(host.id.uuidString) (shared-master alt-name)")
+        if let user = host.user, !user.isEmpty {
+            lines.append("    User \(user)")
+        }
+        for path in host.identityFiles {
+            // Re-use the same expansion the Host block does.
+            lines.append("    \(SSHOption.identityFile.configKey) \(expandTilde(path))")
+        }
+        if !host.identityFiles.isEmpty {
+            lines.append("    IdentitiesOnly yes")
+        }
+        if let value = host.controlMaster.configValue {
+            lines.append("    \(SSHOption.controlMaster.configKey) \(value)")
+            lines.append("    \(SSHOption.controlPath.configKey) \(controlPath(for: host))")
+        }
+        if let value = effectivePersist.configValue {
+            lines.append("    \(SSHOption.controlPersist.configKey) \(value)")
+        }
+        // Per rubber-duck N1: re-assert proxy directives ONLY when set
+        // in the Bastion record. Inheriting from user wildcards is
+        // deliberate (no silent override).
+        if let pj = host.advanced[.proxyJump], !pj.isEmpty {
+            lines.append("    \(SSHOption.proxyJump.configKey) \(pj)")
+        }
+        if let pc = host.advanced[.proxyCommand], !pc.isEmpty {
+            lines.append("    \(SSHOption.proxyCommand.configKey) \(pc)")
+        }
+        return lines
+    }
+
+    /// The literal `ControlPath` value Bastion writes for this host.
+    /// `~/.ssh/sockets/bastion-<12hex>-%p-%r` — the `-%p-%r` segmentation
+    /// is load-bearing security (see `stanzaLines` comment). Public so
+    /// the validation layer can compute the expected post-`ssh -G` form
+    /// without hard-coding the format string in two places.
+    public func controlPath(for host: ManagedHost) -> String {
+        "~/.ssh/sockets/bastion-\(host.resolvedControlMuxID)-%p-%r"
+    }
+
+    /// `ControlPersist` value after applying the "On + Inherit → 8h
+    /// default" upgrade. Extracted so the Match block uses the same
+    /// effective value as the Host block.
+    private func resolvedPersist(for host: ManagedHost) -> ControlPersistChoice {
+        if case .inherit = host.controlPersist, host.controlMaster == .on {
+            return .defaultChoice
+        }
+        return host.controlPersist
     }
 
     // MARK: - Validation
