@@ -90,8 +90,9 @@ public struct ManagedHost: Codable, Sendable, Identifiable, Equatable, Hashable 
     public var updatedAt: Date
 
     /// True for hosts whose server demands an interactive FIDO/WebAuthn
-    /// challenge that `BatchMode=yes` cannot satisfy (e.g. GitHub's
-    /// `vault`). When set, `Connect` runs `ssh -fNM <alias>` in
+    /// challenge that `BatchMode=yes` cannot satisfy (typical of
+    /// SSO-fronted SSH bastions). When set, `Connect` runs
+    /// `ssh -fNM <alias>` in
     /// the user's terminal so they can complete the browser+touch
     /// dance ONCE, then polls `ssh -O check` and auto-opens a shell tab
     /// when the master comes up. Subsequent connects in the same
