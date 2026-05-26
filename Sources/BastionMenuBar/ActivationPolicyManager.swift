@@ -27,7 +27,10 @@ public final class ActivationPolicyManager {
             forName: NSWindow.didBecomeKeyNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.recompute() }
+            // Re-capture inside the Task closure so Swift 5.10's strict
+            // Sendable check (mac-os-14 runner) doesn't complain about
+            // crossing the @Sendable boundary with [weak self].
+            Task { @MainActor [weak self] in self?.recompute() }
         }
         nc.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -36,7 +39,7 @@ public final class ActivationPolicyManager {
             // willClose fires before the window is removed from
             // NSApp.windows; recompute on the next runloop hop.
             DispatchQueue.main.async {
-                Task { @MainActor in self?.recompute() }
+                Task { @MainActor [weak self] in self?.recompute() }
             }
         }
     }
@@ -95,8 +98,13 @@ public extension View {
     /// and skip on re-entry).
     func managesActivationPolicy(identifierPrefix prefix: String) -> some View {
         self.onAppear {
-            ActivationPolicyManager.shared.recompute()
-            DispatchQueue.main.async {
+            // ActivationPolicyManager is @MainActor and onAppear runs on
+            // the main actor in SwiftUI macOS apps, but Swift 5.10's
+            // strict-concurrency mode rejects the implicit-async-call
+            // from a synchronous closure. Wrap in a Task to make the
+            // crossing explicit.
+            Task { @MainActor in
+                ActivationPolicyManager.shared.recompute()
                 ActivationPolicyManager.shared.focus(identifierPrefix: prefix)
             }
         }
