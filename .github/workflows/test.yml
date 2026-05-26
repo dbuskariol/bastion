@@ -7,7 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: macos-14
+    # macos-15 ships Swift 6, which the swift-testing framework's
+    # swiftinterface requires (it uses #_sourceLocation macros as
+    # default arguments — Swift 5.10 rejects them). macos-14 ships
+    # Swift 5.10.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Show Swift version
@@ -26,7 +30,7 @@ jobs:
       - name: Build tests
         run: swift build --build-tests
       - name: Run tests
-        run: swift test --enable-swift-testing
+        run: swift test
       - name: make app (ad-hoc signed)
         run: make app
       - name: Smoke test CLI
