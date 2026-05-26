@@ -1,7 +1,6 @@
 # Releasing
 
-Bastion's release pipeline is fork of Vigil's. Local-only, signed and
-notarized on the developer's Mac.
+Local-only signing and notarization on the developer's Mac, then pushed to GitHub Releases.
 
 ## Prerequisites (one-time)
 

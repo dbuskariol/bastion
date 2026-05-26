@@ -2,13 +2,9 @@
 
 > A macOS menu-bar app and CLI for managing SSH connections — every saved host editable from one place, per-host keys, one-click ControlMaster keepalive, recent-host import from your shell history, and Connect-in-your-terminal-of-choice.
 
-## Status
-
-Pre-release. Built with the same scaffolding pattern as [Vigil](https://github.com/dbuskariol/vigil). v0.1.0 is mid-stabilisation; once it ships the DMG will appear at the releases link below. See [`docs/0.1.0-design.md`](docs/0.1.0-design.md) for the design rationale.
+See [`docs/0.1.0-design.md`](docs/0.1.0-design.md) for the design rationale.
 
 ## Install
-
-Once v0.1.0 ships:
 
 1. Download `Bastion-X.Y.Z.dmg` from [the latest release](https://github.com/dbuskariol/bastion/releases/latest).
 2. Open the DMG and drag `Bastion.app` to the `Applications` shortcut inside it.
@@ -23,7 +19,7 @@ Auto-updates check daily via Sparkle 2 with EdDSA signature verification.
 - **One-click ControlMaster keepalive.** A global "Enable for all" toggle in onboarding, per-host override in the editor. Bastion-owned stable `ControlPath ~/.ssh/sockets/bastion-<id>-%p-%r` and `ControlPersist 8h` by default. Emits a parallel `Match host <hostname>` block so plain `ssh <full-hostname>` and `ssh <alias>` share one master with one auth touch.
 - **First-class FIDO/SSO bastion support.** Auto-detects SSO-fronted SSH hosts (WebAuthn / hardware-key challenge), routes the first connect through your terminal for the touch dance, then auto-opens a shell tab once the master comes up. Subsequent connects in the same `ControlPersist` window are instant.
 - **Connect opens the terminal of your choice.** Runtime-detected list of installed terminals (iTerm2, Ghostty, Warp, WezTerm, kitty, Alacritty, Rio, Tabby, Hyper, Terminal.app) — your pick gets a one-click Connect from the popover.
-- **Expandable per-host diagnostics card** (Vigil's pattern): resolved address, master uptime, attached process count, last-error, opt-in remote `uname/uptime`.
+- **Expandable per-host diagnostics card**: resolved address, master uptime, attached process count, last-error, opt-in remote `uname/uptime`.
 - **Generate ed25519 keys on demand**, store the passphrase in macOS Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — never iCloud-synced).
 - **Opt-in notifications** when a master drops or comes up, when `ControlPersist` expires, when your SSH cert is about to expire, or when an imported host changes in `~/.ssh/config` from outside the app.
 
