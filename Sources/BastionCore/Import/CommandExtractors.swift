@@ -18,7 +18,7 @@ public struct SshExtractor: CommandExtractor {
         var identityFile: String?
         var proxyJump: String?
 
-        var i = 1
+        var i = 0
         let args = Array(argv.dropFirst())
         while i < args.count {
             let arg = args[i]
@@ -118,7 +118,7 @@ public struct ScpExtractor: CommandExtractor {
         var user: String?
         var port = 22
         var identityFile: String?
-        var i = 1
+        var i = 0
         var connections: [ParsedConnection] = []
         let args = Array(argv.dropFirst())
         while i < args.count {
@@ -161,7 +161,7 @@ public struct SftpExtractor: CommandExtractor {
     public func extract(argv: [String], source: HistorySource, timestamp: Date?) -> [ParsedConnection] {
         guard let cmd = argv.first, cmd == "sftp" || cmd.hasSuffix("/sftp") else { return [] }
         var user: String?, hostname: String?, port = 22
-        var i = 1
+        var i = 0
         let args = Array(argv.dropFirst())
         while i < args.count {
             let arg = args[i]
@@ -226,7 +226,7 @@ public struct RsyncExtractor: CommandExtractor {
         guard let cmd = argv.first, cmd == "rsync" || cmd.hasSuffix("/rsync") else { return [] }
         var port = 22
         var connections: [ParsedConnection] = []
-        var i = 1
+        var i = 0
         let args = Array(argv.dropFirst())
         while i < args.count {
             let arg = args[i]
