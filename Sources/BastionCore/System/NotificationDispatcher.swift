@@ -82,14 +82,19 @@ public final class PathChangeWatcher {
         guard !started else { return }
         started = true
         monitor.pathUpdateHandler = { [weak self] path in
-            Task { @MainActor in
+            // Swift 5.10's stricter Sendable diagnostic on Task closures
+            // rejects the previous `[weak self]` outer-capture + inner
+            // `guard let self`. Re-capture inside the Task so the
+            // weak-then-strong dance is local to the @Sendable boundary.
+            let satisfied = path.status == .satisfied
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                let satisfied = path.status == .satisfied
                 if satisfied && !self.lastSatisfied {
                     await self.onPathUp()
                 }
                 self.lastSatisfied = satisfied
             }
+            _ = self  // silence outer-capture-unused warning
         }
         monitor.start(queue: queue)
     }
