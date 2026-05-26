@@ -213,7 +213,7 @@ public struct UserSSHConfigScanner {
         for (idx, rawLine) in lines {
             let lineNumber = idx + 1
             let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            if trimmed == Paths.includeBlockBegin {
+            if trimmed.hasPrefix(Paths.includeBlockBegin) {
                 sentinelInstalled = true
                 bastionIncludeSeen = true
                 continue
