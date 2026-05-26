@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let coordinator = AppCoordinator()
     let updateController = UpdateController()
 
-    private static let log = Logger(subsystem: "com.bastion.menu", category: "appdelegate")
+    nonisolated private static let log = Logger(subsystem: "com.bastion.menu", category: "appdelegate")
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
