@@ -46,8 +46,12 @@ public struct SSHAgentProbe: Sendable {
         for pat in onePassPatterns where socketPath.contains(pat) {
             return .onePassword
         }
-        // Secretive's typical socket path.
-        if socketPath.lowercased().contains("/secretive/") {
+        // Secretive's typical socket path —
+        // ~/Library/Containers/com.maxgoedjen.Secretive.Agent/Data/socket.ssh
+        // — uses the bundle ID, not a slash-bounded "secretive" path
+        // component. Match the bundle ID prefix directly.
+        let lower = socketPath.lowercased()
+        if lower.contains("maxgoedjen.secretive") || lower.contains("/secretive/") {
             return .secretive
         }
         return .other
